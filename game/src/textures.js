@@ -321,6 +321,81 @@ export function createGlowTexture() {
   return toTexture(c);
 }
 
+// ---- location signs: dark steel plate, bright border, bold centred lines --
+export function createSignTexture(width, height, lines, borderColor) {
+  const [c, g] = makeCanvas(width, height);
+  g.fillStyle = '#22262c';
+  g.fillRect(0, 0, width, height);
+  const grad = g.createLinearGradient(0, 0, 0, height);
+  grad.addColorStop(0, 'rgba(255,255,255,0.07)');
+  grad.addColorStop(0.5, 'rgba(255,255,255,0)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.30)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, width, height);
+  g.strokeStyle = borderColor || '#ffb347';
+  g.lineWidth = Math.max(6, height * 0.045);
+  g.strokeRect(g.lineWidth, g.lineWidth, width - g.lineWidth * 2, height - g.lineWidth * 2);
+  // Corner rivets.
+  g.fillStyle = '#565e68';
+  const r = Math.max(5, height * 0.035);
+  for (const [rx, ry] of [[26, 26], [width - 26, 26], [26, height - 26], [width - 26, height - 26]]) {
+    g.beginPath(); g.arc(rx, ry, r, 0, Math.PI * 2); g.fill();
+  }
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  const n = lines.length;
+  lines.forEach((line, i) => {
+    const y = height * ((i + 0.5) / n);
+    g.fillStyle = line.color || '#f2ede4';
+    g.font = `${line.weight || 800} ${line.px}px sans-serif`;
+    g.fillText(line.text, width / 2, y);
+  });
+  return toTexture(c);
+}
+
+// "SITE A" over "CONTAINER ROW" — 1024x288, board aspect 3.56:1.
+export function createSiteSignTexture(site, sub, accent) {
+  return createSignTexture(1024, 288, [
+    { text: site, px: 128, color: '#f2ede4' },
+    { text: sub, px: 58, color: accent || '#ffb347' },
+  ], '#ffb347');
+}
+
+// "TERMINAL" — 1024x256, board aspect 4:1.
+export function createTerminalSignTexture() {
+  return createSignTexture(1024, 256, [
+    { text: 'TERMINAL', px: 150, color: '#f2ede4' },
+  ], '#ffb347');
+}
+
+// "CINDERQUAY CRANE" — 1024x192, board aspect 5.33:1.
+export function createCraneSignTexture() {
+  return createSignTexture(1024, 192, [
+    { text: 'CINDERQUAY CRANE', px: 88, color: '#f2ede4' },
+  ], '#ffb347');
+}
+
+// ---- giant painted site letter: single glyph, transparent background -------
+export function createLetterTexture(letter, color) {
+  const S = 256;
+  const [c, g] = makeCanvas(S, S);
+  g.clearRect(0, 0, S, S);
+  g.fillStyle = color;
+  g.font = `900 ${Math.round(S * 0.8)}px sans-serif`;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(letter, S / 2, S / 2 + S * 0.04);
+  // Worn paint: knock speckles out of the glyph.
+  const rnd = mulberry32(0x1e77 + letter.charCodeAt(0) * 97);
+  g.globalCompositeOperation = 'destination-out';
+  for (let i = 0; i < 300; i++) {
+    g.fillStyle = `rgba(0,0,0,${0.3 + rnd() * 0.5})`;
+    g.fillRect(rnd() * S, rnd() * S, 1 + rnd() * 4, 1 + rnd() * 4);
+  }
+  g.globalCompositeOperation = 'source-over';
+  return toTexture(c);
+}
+
 // ---- horizon haze band: transparent top -> warm haze at the bottom --------
 export function createHazeTexture() {
   const W = 32, H = 128;

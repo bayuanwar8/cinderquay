@@ -2,6 +2,8 @@
 // module never reads or mutates simulation state, it only writes DOM.
 // Every setter remembers its last value and skips the DOM when nothing
 // changed, so the per-frame push from main stays cheap.
+import { createMinimap } from './minimap.js';
+
 export function createHud() {
   const $ = (id) => document.getElementById(id);
   const el = {
@@ -26,6 +28,7 @@ export function createHud() {
     bannerSub: $('banner-sub'),
     bombStatus: $('bomb-status'),
     minimap: $('minimap'),
+    minimapLabel: $('minimap-label'),
     overlay: $('overlay'),
     overlayTitle: $('overlay-title'),
     overlayCopy: $('overlay-copy'),
@@ -38,16 +41,21 @@ export function createHud() {
     channelLabel: $('channel-label'),
     channelFill: $('channel-fill'),
     damageVignette: $('damage-vignette'),
+    flashOverlay: $('flash-overlay'),
+    plan: $('plan'),
     hint: $('hint'),
     weaponSlots: $('weapon-slots'),
+    scoreboardBanner: $('scoreboard-banner'),
+    scoreboardStreak: $('scoreboard-streak'),
+    scoreboardLegend: $('scoreboard-legend'),
   };
 
   // Last-written values, one slot per setter.
   const last = {
     hp: -1, armor: -1, mag: -1, reserve: -1, weapon: '',
-    he: -1, smoke: -1, timer: '', ember: -1, tide: -1, round: -1,
+    he: -1, smoke: -1, flash: -1, timer: '', ember: -1, tide: -1, round: -1,
     money: -1, bomb: '', gap: -1, hint: '', channel: '', channelProg: -2,
-    scoreboard: '', slots: '',
+    scoreboard: '', slots: '', plan: '', flashOp: -1,
   };
   let hitTimer = 0;
   let bannerTimer = 0;
@@ -55,6 +63,9 @@ export function createHud() {
   let playCb = null;
   let restartCb = null;
   let overlayMode = '';
+
+  // Minimap panel: layout + sites + dots + bomb + location label.
+  const minimap = createMinimap(el.minimap, el.minimapLabel);
 
   const OVERLAY_COPY = {
     start: {
@@ -123,13 +134,34 @@ export function createHud() {
       if (el.ammoMag) el.ammoMag.classList.toggle('empty', mag === 0);
     },
 
-    setGrenades(he, smoke) {
-      if (he === last.he && smoke === last.smoke) return;
+    setGrenades(he, smoke, flash) {
+      const fl = flash || 0;
+      if (he === last.he && smoke === last.smoke && fl === last.flash) return;
       last.he = he;
       last.smoke = smoke;
+      last.flash = fl;
       if (el.grenadeCount) {
-        el.grenadeCount.textContent = 'HE ' + he + ' · SMOKE ' + smoke;
+        el.grenadeCount.textContent = 'HE ' + he + ' · SMOKE ' + smoke + ' · FLASH ' + fl;
       }
+    },
+
+    // Team plan + the player's role for this round, under the top bar.
+    setPlan(text) {
+      const t = text || '';
+      if (t === last.plan) return;
+      last.plan = t;
+      if (el.plan) {
+        el.plan.textContent = t;
+        el.plan.classList.toggle('on', t.length > 0);
+      }
+    },
+
+    // White flash-blind overlay, 0 = clear, 1 = full whiteout.
+    setFlash(opacity) {
+      const o = Math.round(Math.max(0, Math.min(1, opacity || 0)) * 50) / 50;
+      if (o === last.flashOp) return;
+      last.flashOp = o;
+      if (el.flashOverlay) el.flashOverlay.style.opacity = String(o);
     },
 
     setTimer(s) {
@@ -276,106 +308,11 @@ export function createHud() {
       }
     },
 
-    drawMinimap(agents, sites, bomb, playerYaw, visibleEnemies) {
-      const canvas = el.minimap;
-      if (!canvas) return;
-      const ctx2d = canvas.getContext('2d');
-      if (!ctx2d) return;
-      const W = canvas.width || 180;
-      const H = canvas.height || 140;
-      // Yard x [-32, 32], z [-24, 24] -> canvas, north (-z) at the top.
-      const scale = Math.min(W / 64, H / 48);
-      const ox = (W - 64 * scale) / 2;
-      const oy = (H - 48 * scale) / 2;
-      const px = (x) => ox + (x + 32) * scale;
-      const py = (z) => oy + (z + 24) * scale;
-      const visible = visibleEnemies instanceof Set ? visibleEnemies : new Set();
-
-      ctx2d.clearRect(0, 0, W, H);
-      ctx2d.fillStyle = '#2a2726';
-      ctx2d.fillRect(0, 0, W, H);
-      // Yard border (perimeter walls).
-      ctx2d.strokeStyle = '#6b6560';
-      ctx2d.lineWidth = 2;
-      ctx2d.strokeRect(px(-32), py(-24), 64 * scale, 48 * scale);
-      // Mid container block hint.
-      ctx2d.fillStyle = '#4a5560';
-      ctx2d.fillRect(px(-3), py(-1.3), 6 * scale, 2.6 * scale);
-      // Sites.
-      const siteList = [];
-      if (sites) {
-        if (sites.A) siteList.push(['A', sites.A]);
-        if (sites.B) siteList.push(['B', sites.B]);
-        if (Array.isArray(sites)) sites.forEach((s, i) => siteList.push([s.label || String(i), s]));
-      }
-      ctx2d.font = 'bold 10px sans-serif';
-      ctx2d.textAlign = 'center';
-      ctx2d.textBaseline = 'middle';
-      for (const [label, s] of siteList) {
-        const r = (s.r || 3.4) * scale;
-        ctx2d.beginPath();
-        ctx2d.arc(px(s.x), py(s.z), r, 0, Math.PI * 2);
-        ctx2d.fillStyle = 'rgba(255, 140, 46, 0.18)';
-        ctx2d.fill();
-        ctx2d.strokeStyle = '#ff8c2e';
-        ctx2d.lineWidth = 1;
-        ctx2d.stroke();
-        ctx2d.fillStyle = '#ff8c2e';
-        ctx2d.fillText(label, px(s.x), py(s.z));
-      }
-      // Bomb dot (planted position, or site centre when only the site is known).
-      let bombXY = null;
-      if (bomb) {
-        if (bomb.pos && typeof bomb.pos.x === 'number') bombXY = { x: bomb.pos.x, z: bomb.pos.z };
-        else if (typeof bomb.x === 'number') bombXY = { x: bomb.x, z: bomb.z };
-        else if (bomb.site && sites && sites[bomb.site]) bombXY = sites[bomb.site];
-      }
-      if (bombXY) {
-        ctx2d.beginPath();
-        ctx2d.arc(px(bombXY.x), py(bombXY.z), 4, 0, Math.PI * 2);
-        ctx2d.fillStyle = '#ff3b30';
-        ctx2d.fill();
-        ctx2d.strokeStyle = '#fff';
-        ctx2d.lineWidth = 1;
-        ctx2d.stroke();
-      }
-      // Agents: player triangle, teammates amber, visible enemies teal.
-      const list = agents || [];
-      for (const a of list) {
-        if (!a || a.alive === false) continue;
-        const pos = a.pos || a;
-        if (typeof pos.x !== 'number' || typeof pos.z !== 'number') continue;
-        const x = px(pos.x);
-        const y = py(pos.z);
-        if (a.isPlayer || a.id === 0) {
-          const yaw = typeof playerYaw === 'number' ? playerYaw : (a.yaw || 0);
-          // Yaw 0 faces north (-z); triangle points along facing.
-          ctx2d.save();
-          ctx2d.translate(x, y);
-          ctx2d.rotate(Math.PI - yaw);
-          ctx2d.beginPath();
-          ctx2d.moveTo(0, -7);
-          ctx2d.lineTo(5, 5);
-          ctx2d.lineTo(-5, 5);
-          ctx2d.closePath();
-          ctx2d.fillStyle = '#ffb347';
-          ctx2d.fill();
-          ctx2d.strokeStyle = '#fff';
-          ctx2d.lineWidth = 1;
-          ctx2d.stroke();
-          ctx2d.restore();
-        } else if (a.team === 'ember') {
-          ctx2d.beginPath();
-          ctx2d.arc(x, y, 3, 0, Math.PI * 2);
-          ctx2d.fillStyle = '#ff8c2e';
-          ctx2d.fill();
-        } else if (visible.has(a.id)) {
-          ctx2d.beginPath();
-          ctx2d.arc(x, y, 3, 0, Math.PI * 2);
-          ctx2d.fillStyle = '#2ec4b6';
-          ctx2d.fill();
-        }
-      }
+    // Same signature as before, plus an optional 6th arg: the world
+    // collider list (world.colliders) the minimap draws its layout from.
+    // The drawing itself lives in minimap.js.
+    drawMinimap(agents, sites, bomb, playerYaw, visibleEnemies, layout) {
+      minimap.draw(agents, sites, bomb, playerYaw, visibleEnemies, layout);
     },
 
     hitMarker(kill) {
@@ -410,27 +347,68 @@ export function createHud() {
       if (el.channelFill) el.channelFill.style.width = Math.round(prog * 100) + '%';
     },
 
-    setScoreboard(agents) {
+    // Scoreboard: Name / Role / Team / K / D / DMG / HS% / MVP / Funds,
+    // with the round-end banner above it, a W/L streak row and a legend.
+    // meta: { banner, streakText } — both optional; the banner names the
+    // round winner and its MVP, e.g. "EMBER WIN — MVP You".
+    setScoreboard(agents, meta) {
       if (!el.scoreboard || !el.scoreboardBody) return;
-      const rows = (agents || []).map((a) => [
-        a.team || '', a.name || ('#' + a.id), a.kills || 0, a.deaths || 0, a.money || 0, a.alive ? '' : 'dead',
+      const list = (agents || []).slice();
+      const mvpId = (() => {
+        let best = null;
+        for (const a of list) {
+          if (!best || (a.kills || 0) > (best.kills || 0) ||
+            ((a.kills || 0) === (best.kills || 0) && (a.dmg || 0) > (best.dmg || 0))) best = a;
+        }
+        return best && (best.kills || 0) > 0 ? best.id : -1;
+      })();
+      const rows = list.map((a) => [
+        a.team || '', a.name || ('#' + a.id), a.kills || 0, a.deaths || 0,
+        a.dmg || 0, a.hsKills || 0, a.money || 0, a.id === mvpId ? 'mvp' : '',
       ].join('|')).join('\n');
-      if (rows === last.scoreboard) {
+      const bannerText = (meta && meta.banner) || '';
+      const streakText = (meta && meta.streakText) || '';
+      const key = rows + '||' + bannerText + '||' + streakText;
+      if (key === last.scoreboard) {
         show(el.scoreboard, true);
         return;
       }
-      last.scoreboard = rows;
+      last.scoreboard = key;
+      if (el.scoreboardBanner) {
+        el.scoreboardBanner.textContent = bannerText;
+        el.scoreboardBanner.classList.toggle('on', bannerText.length > 0);
+      }
+      if (el.scoreboardStreak) {
+        el.scoreboardStreak.textContent = streakText;
+        el.scoreboardStreak.classList.toggle('on', streakText.length > 0);
+      }
+      if (el.scoreboardLegend) {
+        el.scoreboardLegend.textContent = '★ MVP — most kills · HS% = headshot kills ÷ kills · Funds = credits';
+      }
       el.scoreboardBody.textContent = '';
-      for (const a of agents || []) {
+      // Ember first, then by kills — the winning side reads top-down.
+      list.sort((a, b) => {
+        if ((a.team || '') !== (b.team || '')) return a.team === 'ember' ? -1 : 1;
+        return (b.kills || 0) - (a.kills || 0);
+      });
+      for (const a of list) {
         const tr = document.createElement('tr');
         tr.className = (a.team || '') + (a.alive ? '' : ' dead');
+        const hsPct = (a.kills || 0) > 0
+          ? Math.round(100 * (a.hsKills || 0) / (a.kills || 0)) + '%'
+          : '—';
         const cells = [
-          (a.isPlayer ? 'You (' + (a.name || '') + ')' : (a.name || ('#' + a.id))),
+          (a.isPlayer ? 'You' : (a.name || ('#' + a.id))),
+          a.role || '—',
+          (a.team || '').toUpperCase(),
           String(a.kills || 0),
           String(a.deaths || 0),
+          String(a.dmg || 0),
+          hsPct,
+          a.id === mvpId ? '★' : '',
           '$' + (a.money || 0),
         ];
-        cells.forEach((text, i) => {
+        cells.forEach((text) => {
           const td = document.createElement('td');
           td.textContent = text;
           tr.appendChild(td);
@@ -462,6 +440,7 @@ export function createHud() {
           { id: 'pistol', label: '2 ' + (o.pistol || 'P9 Sidearm') },
           { id: 'he', label: '3 HE ×' + (o.he || 0) },
           { id: 'smoke', label: '4 SMOKE ×' + (o.smoke || 0) },
+          { id: 'flash', label: '5 FLASH ×' + (o.flash || 0) },
         ];
       }
       const key = String(current) + '|' + entries.map((e) => e.id + '=' + e.label).join(',');

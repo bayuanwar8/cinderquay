@@ -37,6 +37,9 @@ export function createState(seed) {
     banner: null, // { title, sub, until } | null
     roundWinner: null,
     matchWinner: null,
+    streak: { ember: 0, tide: 0 }, // consecutive round wins, for the scoreboard
+    mvpId: -1,
+    mvpName: '',
   };
 }
 
@@ -51,11 +54,17 @@ export function addFeed(state, text, cls) {
 // folded in weapon damage and the head multiplier); `isHead` only affects
 // the feed wording. Armor absorbs half the damage until it runs out, the
 // rest goes to hp. On death: alive=false, deaths++, killer gets a kill and
-// +$300, and a feed line is added. Returns 'hit' | 'kill', or null when the
+// +$300, and a feed line is added — with an HS marker on headshot kills.
+// Damage dealt and headshot kills are tallied on the attacker for the
+// scoreboard (DMG / HS%). Returns 'hit' | 'kill', or null when the
 // target was already dead (no double kill, no double payout).
 export function damageAgent(state, target, amount, isHead, attacker) {
   if (!target || !target.alive) return null;
   if (!(amount > 0)) return 'hit';
+
+  if (attacker && attacker !== target) {
+    attacker.dmg = (attacker.dmg || 0) + amount;
+  }
 
   let remaining = amount;
   if (target.armor > 0) {
@@ -74,13 +83,14 @@ export function damageAgent(state, target, amount, isHead, attacker) {
   if (attacker && attacker !== target) {
     attacker.kills += 1;
     attacker.money += 300;
+    if (isHead) attacker.hsKills = (attacker.hsKills || 0) + 1;
   }
 
   const killerName = attacker ? attacker.name : 'The yard';
   const killerCls = attacker && attacker.team ? attacker.team : 'info';
   addFeed(
     state,
-    `${killerName} ▸ ${target.name}${isHead ? ' (headshot)' : ''}`,
+    `${killerName} ▸ ${target.name}${isHead ? ' — HS' : ''}`,
     killerCls,
   );
   return 'kill';

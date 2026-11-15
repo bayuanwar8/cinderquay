@@ -167,6 +167,15 @@ export function setupShot(name, ctx) {
     syncRigAmmo('rifle', 22, 60);
     setCamera(-6, EYE, 8, -5, 1.4, -4);
     settle(30);
+    // Freeze the staged bots mid-stride (v3 character work): legs at full
+    // opposite swing so the firefight reads as motion, not a standstill.
+    // The sim is frozen after setupShot returns, so these poses hold for
+    // the capture. freezePose lives in bots.js and touches render only.
+    if (ctx.bots && typeof ctx.bots.freezePose === 'function') {
+      if (tideMid) ctx.bots.freezePose(tideMid, Math.PI / 2, yawToward(-5, -4, -6, 8));
+      if (tideLane) ctx.bots.freezePose(tideLane, Math.PI * 0.85, yawToward(-7, -8, -6, 8));
+      if (emberMate) ctx.bots.freezePose(emberMate, Math.PI / 2.4, yawToward(-7.5, 3, -5, -4));
+    }
     // Fresh tracer + frozen muzzle flash, added AFTER settle so they are
     // still bright in the capture instead of decayed.
     if (player && ctx.effects && typeof ctx.effects.addTracer === 'function') {
@@ -205,8 +214,8 @@ export function setupShot(name, ctx) {
         { id: 'rifle', name: 'KR-47 Emberline' },
       ]);
       hud.setCrosshairGap(6);
-      hud.feed('Kelp eliminated Ash', 'tide');
-      hud.feed('You eliminated Brine', 'ember');
+      hud.feed('Kelp ▸ Ash', 'tide');
+      hud.feed('You ▸ Brine — HS', 'ember');
     }
     return;
   }
@@ -299,6 +308,148 @@ export function setupShot(name, ctx) {
     return;
   }
 
+  if (name === 'buy') {
+    // Buy phase, round 5: the menu is open, the 12 s buy clock shows
+    // 0:11, the rifle is already owned, kevlar is maxed (owned), and
+    // one HE + one smoke are in the bag. Flash grenades do not exist in
+    // this base yet (workstream B adds them); the shot re-shoots after
+    // integration. Camera holds the spawn lane so the yard, minimap and
+    // teammates stay visible behind the dimmed menu.
+    state.phase = 'buy';
+    state.round = 5;
+    state.buyTimeLeft = 11;
+    state.roundTimeLeft = 100;
+    state.scores = { ember: 2, tide: 2 };
+    state.bomb = { status: 'idle', site: null, carrierId: -1, planterId: -1, defuserId: -1, progress: 0, timer: 35, pos: null };
+    resetAgents();
+    if (player) {
+      player.weaponId = 'rifle';
+      player.mag = 30;
+      player.reserve = 90;
+      player.hp = 100;
+      player.armor = 100;
+      player.money = 3850;
+      player.grenades = { he: 1, smoke: 1 };
+    }
+    placePlayer(0, 20, 0);
+    syncRigAmmo('rifle', 30, 90);
+    setCamera(0, EYE, 20, 0, 1.4, -14);
+    // settle() runs step(), whose phase-change hook opens the buy menu
+    // from the staged player values (rifle + kevlar owned, HE/SMOKE x1).
+    settle(10);
+    if (hud) {
+      hud.hideOverlay();
+      baseHud(100, 100, 30, 90, 'KR-47 Emberline', 11, 2, 2, 5, 3850);
+      hud.setGrenades(1, 1);
+      hud.setWeaponSlots('rifle', [
+        { id: 'pistol', name: 'P9 Sidearm' },
+        { id: 'rifle', name: 'KR-47 Emberline' },
+      ]);
+      hud.feed('You ▸ Kelp', 'ember');
+      hud.feed('Ash ▸ Fathom', 'ember');
+      // baseHud hides the menu, so re-open it from the staged values.
+      if (typeof ctx.openBuyMenu === 'function') ctx.openBuyMenu();
+      // The menu's round label and wallet line are static HTML in v2 —
+      // stage them to match the round and the money above.
+      const buyRound = document.getElementById('buy-round');
+      if (buyRound) buyRound.textContent = '5';
+      const buyMoney = document.getElementById('buy-money');
+      if (buyMoney) buyMoney.textContent = '$3,850';
+    }
+    return;
+  }
+
+  if (name === 'scores') {
+    // Round end, round 5: Ember takes it 3-2 on a site A detonation and
+    // the scoreboard is open with every row filled. The v2 scoreboard
+    // only renders Player / K / D / $ — the Role / DMG / HS% / MVP
+    // columns are workstream B's hud.js rebuild, so this shot re-shoots
+    // after integration. The round-end banner is folded into the
+    // scoreboard heading (a centred overlay would cover the board).
+    state.phase = 'roundEnd';
+    state.round = 5;
+    state.roundTimeLeft = 0;
+    state.scores = { ember: 3, tide: 2 };
+    state.roundWinner = 'ember';
+    state.bomb = { status: 'exploded', site: 'A', carrierId: -1, planterId: -1, defuserId: -1, progress: 0, timer: 0, pos: null };
+    resetAgents();
+    // Staged table: the player is MVP on 7 kills; the rest of the
+    // table is a plausible 5-round tally. money is the funds column;
+    // dmg / hsKills fill the DMG and HS% columns (0s there read as a
+    // broken board — every row must show real numbers).
+    const table = {
+      You: { kills: 7, deaths: 2, money: 5200, dmg: 512, hsKills: 2, alive: true },
+      Ash: { kills: 5, deaths: 3, money: 4100, dmg: 380, hsKills: 1, alive: true },
+      Coal: { kills: 4, deaths: 4, money: 2900, dmg: 290, hsKills: 1, alive: true },
+      Rust: { kills: 3, deaths: 5, money: 1750, dmg: 210, hsKills: 0, alive: false },
+      Soot: { kills: 2, deaths: 4, money: 1200, dmg: 160, hsKills: 1, alive: true },
+      Brine: { kills: 6, deaths: 5, money: 3600, dmg: 470, hsKills: 2, alive: false },
+      Kelp: { kills: 5, deaths: 6, money: 2400, dmg: 350, hsKills: 1, alive: false },
+      Fathom: { kills: 4, deaths: 5, money: 2900, dmg: 300, hsKills: 1, alive: true },
+      Salter: { kills: 3, deaths: 6, money: 1500, dmg: 190, hsKills: 0, alive: false },
+      Marrow: { kills: 2, deaths: 7, money: 900, dmg: 140, hsKills: 1, alive: true },
+    };
+    agents.forEach((a) => {
+      if (!a) return;
+      const row = table[a.name] || table.You;
+      a.kills = row.kills;
+      a.deaths = row.deaths;
+      a.money = row.money;
+      a.dmg = row.dmg;
+      a.hsKills = row.hsKills;
+      a.alive = row.alive;
+    });
+    if (player) {
+      player.name = 'Vex'; // renders as "You (Vex)" in the v2 board
+      player.weaponId = 'rifle';
+      player.mag = 22;
+      player.reserve = 60;
+      player.hp = 100;
+      player.armor = 50;
+      player.money = 5200;
+      player.grenades = { he: 1, smoke: 0 };
+    }
+    // Same site A composition as 'end': fallen Tide bots at the frame
+    // edges, one standing Ember guard, the blast site in view — the
+    // centred board covers the middle, the yard shows around it.
+    const tideDown1 = byTeam('tide', 0);
+    const tideDown2 = byTeam('tide', 1);
+    const emberStand = byTeam('ember', 0);
+    drop(tideDown1, -19.5, -11.5, 2.3);
+    drop(tideDown2, -22, -12.5, -0.84);
+    place(emberStand, -17.5, -13.5, yawToward(-17.5, -13.5, -22, -14));
+    placePlayer(-16.5, -9, yawToward(-16.5, -9, -21, -14));
+    if (player) player.pitch = 0.18;
+    syncRigAmmo('rifle', 22, 60);
+    if (ctx.applySlot) ctx.applySlot();
+    setCamera(-16.5, EYE, -9, -21, 0.7, -14);
+    settle(30);
+    if (ctx.effects && typeof ctx.effects.addExplosion === 'function') {
+      try { ctx.effects.addExplosion(new THREE.Vector3(-22, 1, -14)); } catch (e) { /* no-op */ }
+    }
+    if (hud) {
+      hud.hideOverlay();
+      hud.hideBuyMenu();
+      hud.setHealth(100, 50);
+      hud.setAmmo(22, 60, 'KR-47 Emberline');
+      hud.setTimer(0);
+      hud.setScore(3, 2);
+      hud.setRound(5);
+      hud.setMoney(5200);
+      hud.setBombStatus('');
+      hud.setChannel('', null);
+      hud.setHint('');
+      hud.setGrenades(1, 0);
+      hud.feed('You ▸ Brine — HS', 'ember');
+      hud.feed('Ash ▸ Kelp', 'ember');
+      hud.feed('Brine ▸ Rust', 'tide');
+      hud.setScoreboard(agents);
+      const heading = document.querySelector('#scoreboard h2');
+      if (heading) heading.textContent = 'EMBER TAKES ROUND 5 — MVP You ★';
+    }
+    return;
+  }
+
   if (name === 'end') {
     state.phase = 'roundEnd';
     state.round = 5;
@@ -361,6 +512,127 @@ export function setupShot(name, ctx) {
         score: { ember: 3, tide: 2 },
         winner: 'ember',
         reason: 'Site A cleared — Tide eliminated.',
+      });
+    }
+    return;
+  }
+
+  if (name === 'buy') {
+    state.phase = 'buy';
+    state.round = 2;
+    state.buyTimeLeft = 11;
+    state.roundTimeLeft = 100;
+    state.scores = { ember: 1, tide: 0 };
+    state.attackSide = 'tide';
+    state.bomb = { status: 'carried', site: 'A', carrierId: 1, planterId: -1, defuserId: -1, progress: 0, timer: 35, pos: null };
+    resetAgents();
+    if (player) {
+      player.weaponId = 'rifle';
+      player.mag = 30;
+      player.reserve = 90;
+      player.hp = 100;
+      player.armor = 100; // kevlar + helm bought: buy menu shows OWNED
+      player.money = 4200;
+      player.grenades = { he: 1, smoke: 1, flash: 1 };
+      player.defuseKit = false;
+    }
+    placePlayer(0, 20, 0);
+    syncRigAmmo('rifle', 30, 90);
+    if (ctx.applySlot) ctx.applySlot();
+    setCamera(0, EYE, 20, 0, 1.4, -14);
+    settle(10);
+    if (hud) {
+      hud.hideOverlay();
+      baseHud(100, 100, 30, 90, 'KR-47 Emberline', 11, 1, 0, 2, 4200);
+      hud.setGrenades(1, 1, 1);
+      hud.setWeaponSlots('primary', [
+        { id: 'pistol', name: 'P9 Sidearm' },
+        { id: 'rifle', name: 'KR-47 Emberline' },
+      ]);
+      hud.setTimer(11);
+      // The buy menu itself: flash grenade + defuse kit listed, kevlar
+      // shown OWNED at armor 100. Opened AFTER baseHud (which hides it).
+      if (ctx.openBuyMenu) ctx.openBuyMenu();
+      hud.setHint('Buy phase — 0:11 left');
+    }
+    return;
+  }
+
+  if (name === 'scores') {
+    state.phase = 'roundEnd';
+    state.round = 5;
+    state.roundTimeLeft = 0;
+    state.scores = { ember: 3, tide: 2 };
+    state.roundWinner = 'ember';
+    state.mvpName = 'You';
+    state.streak = { ember: 2, tide: 0 };
+    state.losses = { ember: 0, tide: 1 };
+    state.bomb = { status: 'exploded', site: 'A', carrierId: -1, planterId: -1, defuserId: -1, progress: 0, timer: 0, pos: null };
+    resetAgents();
+    // Staged round stats, varied per agent so every scoreboard column
+    // reads (K / D / DMG / HS% / MVP / Funds).
+    const staged = {
+      You: { kills: 4, deaths: 1, dmg: 512, hsKills: 2, money: 4550 },
+      Ash: { kills: 3, deaths: 2, dmg: 380, hsKills: 1, money: 3900 },
+      Coal: { kills: 1, deaths: 2, dmg: 140, hsKills: 0, money: 2900 },
+      Rust: { kills: 2, deaths: 1, dmg: 265, hsKills: 1, money: 3400 },
+      Soot: { kills: 0, deaths: 3, dmg: 55, hsKills: 0, money: 2400 },
+      Brine: { kills: 3, deaths: 2, dmg: 410, hsKills: 2, money: 3600 },
+      Kelp: { kills: 2, deaths: 3, dmg: 290, hsKills: 0, money: 3100 },
+      Fathom: { kills: 1, deaths: 2, dmg: 120, hsKills: 0, money: 2700 },
+      Salter: { kills: 1, deaths: 3, dmg: 95, hsKills: 0, money: 2500 },
+      Marrow: { kills: 2, deaths: 2, dmg: 230, hsKills: 1, money: 3000 },
+    };
+    for (const a of agents) {
+      if (!a) continue;
+      const s = staged[a.name];
+      if (!s) continue;
+      a.kills = s.kills;
+      a.deaths = s.deaths;
+      a.dmg = s.dmg;
+      a.hsKills = s.hsKills;
+      a.money = s.money;
+    }
+    const tideDown1 = byTeam('tide', 0);
+    const tideDown2 = byTeam('tide', 1);
+    const emberStand = byTeam('ember', 0);
+    drop(tideDown1, -19.5, -11.5, 2.3);
+    drop(tideDown2, -22, -12.5, -0.84);
+    place(emberStand, -17.5, -13.5, yawToward(-17.5, -13.5, -22, -14));
+    if (player) {
+      player.weaponId = 'rifle';
+      player.mag = 22;
+      player.reserve = 60;
+      player.money = 4550;
+      player.hp = 100;
+      player.armor = 50;
+      player.grenades = { he: 1, smoke: 0, flash: 1 };
+    }
+    placePlayer(-16.5, -9, yawToward(-16.5, -9, -21, -14));
+    if (player) player.pitch = 0.18;
+    syncRigAmmo('rifle', 22, 60);
+    if (ctx.applySlot) ctx.applySlot();
+    setCamera(-16.5, EYE, -9, -21, 0.7, -14);
+    settle(30);
+    if (ctx.effects && typeof ctx.effects.addExplosion === 'function') {
+      try { ctx.effects.addExplosion(new THREE.Vector3(-22, 1, -14)); } catch (e) { /* no-op */ }
+    }
+    if (hud) {
+      hud.hideOverlay();
+      hud.setHealth(100, 50);
+      hud.setAmmo(22, 60, 'KR-47 Emberline');
+      hud.setTimer(0);
+      hud.setScore(3, 2);
+      hud.setRound(5);
+      hud.setMoney(4550);
+      hud.setBombStatus('');
+      hud.setChannel('', null);
+      hud.setGrenades(1, 0, 1);
+      hud.feed('You ▸ Kelp — HS', 'ember');
+      hud.feed('Ash ▸ Brine', 'ember');
+      hud.setScoreboard(agents, {
+        banner: 'EMBER WIN — MVP You',
+        streakText: 'EMBER W2 · TIDE L1',
       });
     }
     return;

@@ -14,6 +14,10 @@ import {
   createCrateTexture,
   createGlowTexture,
   createHazeTexture,
+  createLetterTexture,
+  createSiteSignTexture,
+  createTerminalSignTexture,
+  createCraneSignTexture,
 } from './textures.js';
 
 const CONTAINER_COLORS = ['rust', 'teal', 'mustard', 'olive'];
@@ -135,6 +139,14 @@ export function createWorld(scene) {
     });
   }
   const glowTex = createGlowTexture();
+  const letterTexA = createLetterTexture('A', PALETTE.ember);
+  const letterTexB = createLetterTexture('B', PALETTE.ink);
+  const letterTexWhite = createLetterTexture('A', PALETTE.ink);
+  const letterTexWhiteB = createLetterTexture('B', PALETTE.ink);
+  const siteSignA = createSiteSignTexture('SITE A', 'CONTAINER ROW', PALETTE.ember);
+  const siteSignB = createSiteSignTexture('SITE B', 'CRANE YARD', PALETTE.tide);
+  const terminalSign = createTerminalSignTexture();
+  const craneSign = createCraneSignTexture();
 
   // Solid box: mesh + Box3 collider + bullet stopper. y is the centre height.
   // matOverride swaps the flat palette material for a textured one.
@@ -161,6 +173,51 @@ export function createWorld(scene) {
     mesh.receiveShadow = true;
     group.add(mesh);
     return mesh;
+  }
+
+  // Painted letter decal: transparent canvas texture on a plane, held just
+  // proud of the surface it paints (wall face or ground). No collider.
+  // ry turns the plane to face +x (PI/2) / -x (-PI/2); rx = -PI/2 lays it
+  // flat on the ground, glyph top toward north (-z) so it reads upright
+  // from a southern approach.
+  function decal(w, h, x, y, z, ry, tex, rx = 0) {
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshStandardMaterial({
+        map: tex, transparent: true, roughness: 0.9, metalness: 0,
+        polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+        depthWrite: false,
+      }),
+    );
+    mesh.position.set(x, y, z);
+    mesh.rotation.set(rx, ry, 0);
+    mesh.receiveShadow = true;
+    group.add(mesh);
+    return mesh;
+  }
+
+  // Location sign: dark steel backing box + opaque sign texture face.
+  // The face sits 0.045 m proud of the backing along the plane normal.
+  function signBoard(w, h, x, y, z, ry, tex) {
+    const back = new THREE.Mesh(
+      new THREE.BoxGeometry(w + 0.12, h + 0.12, 0.07),
+      materials.steel,
+    );
+    back.position.set(x, y, z);
+    back.rotation.y = ry;
+    back.castShadow = true;
+    back.receiveShadow = true;
+    group.add(back);
+    const face = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0.08 }),
+    );
+    face.position.set(x, y, z);
+    face.rotation.y = ry;
+    face.translateZ(0.045);
+    face.receiveShadow = true;
+    group.add(face);
+    return face;
   }
 
   // Barrel: cylinder mesh, collider approximated by a square box.
@@ -413,6 +470,8 @@ export function createWorld(scene) {
   }
 
   // ---- crane silhouette, outside the north wall ------------------------------
+  // v3: bigger silhouette — 26 m mast (was 20), jib stretched east to x=-4
+  // (was -10) so the crane reads as the yard landmark over the north wall.
   const crane = new THREE.Group();
   function craneBox(w, h, d, x, y, z) {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), silhouette);
@@ -420,14 +479,15 @@ export function createWorld(scene) {
     crane.add(mesh);
     return mesh;
   }
-  craneBox(1.8, 20, 1.8, -28, 10, -28);          // mast
-  craneBox(1.8, 20, 1.8, -23, 10, -28);          // second leg
-  craneBox(6.8, 1.5, 1.5, -25.5, 19.6, -28);     // mast cap
-  craneBox(24, 1.2, 1.2, -22, 18.8, -28);        // jib reaching east
-  craneBox(9, 1.1, 1.1, -34.5, 18.8, -28);       // counter-jib west
-  craneBox(0.12, 6.5, 0.12, -14, 15.2, -28);     // hanging cable
-  craneBox(0.9, 0.9, 0.9, -14, 11.6, -28);       // hook block
-  craneBox(2.4, 1.8, 1.8, -27, 17.6, -28);       // operator cab
+  craneBox(1.8, 26, 1.8, -28, 13, -28);          // mast
+  craneBox(1.8, 26, 1.8, -23, 13, -28);          // second leg
+  craneBox(6.8, 0.8, 0.8, -25.5, 13, -28);       // mast tie beam
+  craneBox(6.8, 1.5, 1.5, -25.5, 25.6, -28);     // mast cap
+  craneBox(30, 1.2, 1.2, -19, 24.8, -28);        // jib reaching east
+  craneBox(9, 1.1, 1.1, -34.5, 24.8, -28);       // counter-jib west
+  craneBox(0.12, 8, 0.12, -10, 20.8, -28);       // hanging cable
+  craneBox(0.9, 0.9, 0.9, -10, 16.4, -28);       // hook block
+  craneBox(2.4, 1.8, 1.8, -27, 23.6, -28);       // operator cab
   group.add(crane);
 
   // Crane warning light, blinking in update().
@@ -438,8 +498,31 @@ export function createWorld(scene) {
     roughness: 0.4,
   });
   const craneLight = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 8), craneLightMat);
-  craneLight.position.set(-11.5, 19.3, -28);
+  craneLight.position.set(-10, 25.4, -28);
   group.add(craneLight);
+
+  // ---- site letters + location signs (v3) ------------------------------------
+  // Giant letters: "A" painted on the east face of the site A west container
+  // (face x=-24.7) + on the site A ground pad; "B" on the west face of the
+  // site B east container (face x=+24.7) + on the site B ground pad. All
+  // visual-only — no collider or gameplay position changes.
+  decal(2.4, 2.4, -24.67, 1.35, -14, Math.PI / 2, letterTexA);       // wall A
+  decal(2.4, 2.4, 24.67, 1.35, -14, -Math.PI / 2, letterTexB);       // wall B
+  decal(6, 6, -22, 0.02, -14, 0, letterTexWhite, -Math.PI / 2);      // ground A
+  decal(6, 6, 22, 0.02, -14, 0, letterTexWhiteB, -Math.PI / 2);      // ground B
+  // Site signs on the south face (z=-17.7) of each site's north container.
+  // Narrow (2.4 m) and flush with the outer edge of the face so the whole
+  // board — text included — stays inside the plant-shot frame from the
+  // site approach instead of running off the right edge.
+  signBoard(2.4, 0.67, -19.3, 1.45, -17.64, 0, siteSignA);
+  signBoard(2.4, 0.67, 19.3, 1.45, -17.64, 0, siteSignB);
+  // "TERMINAL" on the north wall inner face (z=-24.0), centred on the wall
+  // so it reads from mid-map through the gap between the mid block and the
+  // west north-connector container.
+  signBoard(7, 1.75, 0, 3.6, -23.96, 0, terminalSign);
+  // "CINDERQUAY CRANE" name board across the crane mast legs, south face
+  // (legs at z=-28, face z=-27.1); y=8 clears the north wall from the yard.
+  signBoard(6, 1.13, -25.5, 8, -27.04, 0, craneSign);
 
   // ---- sky: gradient dome + stars + sun glow + haze + skyline --------------
   // The dome IS the background (no solid scene.background any more).

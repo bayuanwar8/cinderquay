@@ -1,15 +1,20 @@
 // bots.js — the 9 bot teammates/opponents of CINDERQUAY.
-// Builds low-poly humanoid meshes, runs the per-bot brain (push / hold /
-// engage / plant / defuse / retreat / dead) and fires hitscan shots through
-// weapons.js. All gameplay randomness goes through state.rng.
+// Coordinator only: it builds the agents (meshes in botmodels.js), runs
+// the per-bot brain (push / hold / engage / plant / defuse / retreat /
+// dead) and fires hitscan shots through weapons.js. The brain's pieces
+// live in their own modules: nav.js (waypoints + BFS), hearing.js
+// (hearShot + investigate), tactics.js (roles + site push + rotation).
+// All gameplay randomness goes through state.rng.
 // Movement collision is shared with the player via createMover.
 
 import * as THREE from 'three';
-import { createMover } from './player.js';
-import { WEAPONS, hitscan, throwGrenade } from './weapons.js';
-import { PALETTE } from './palette.js';
-import { damageAgent, aliveAgents } from './state.js';
-
+import { WEAPONS, hitscan } from './weapons.js';
+import { throwGrenade } from './grenades.js';
+import { damageAgent } from './state.js';
+import { dist2d, yawTo, segmentHitsSphere, createNavigator } from './nav.js';
+import { createHearing } from './hearing.js';
+import { assignTasks, clearPlantState, updateCarrier, postPlant } from './tactics.js';
+import { buildBot, syncMesh } from './botmodels.js';
 const EMBER_NAMES = ['Ash', 'Coal', 'Rust', 'Soot'];
 const TIDE_NAMES = ['Brine', 'Kelp', 'Fathom', 'Salter', 'Marrow'];
 
@@ -17,29 +22,23 @@ const BOT_SPEED = 4.2;
 const BOT_CROUCH_SPEED = 3.0;
 const EYE_STAND = 1.6;
 const LOS_HZ = 5; // perception throttle, checks per second per bot
-const HEAR_RADIUS = 25;
 const PICKUP_RADIUS = 1.5;
 const REACT_MIN = 0.35;
 const REACT_MAX = 0.7;
 const AIM_ERR_MIN = 2; // degrees
 const AIM_ERR_MAX = 4;
 const ENGAGE_RANGE = 48;
-const FALL_TIME = 0.4; // seconds for the death fall-over
 
 // Module-level scratch only — nothing is allocated inside step().
 const _eye = new THREE.Vector3();
 const _targetEye = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _to = new THREE.Vector3();
-const _segA = new THREE.Vector3();
-const _segB = new THREE.Vector3();
-const _closest = new THREE.Vector3();
 const _hitPoint = new THREE.Vector3();
 const _ray = new THREE.Raycaster();
 const _boxHit = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
 const _right = new THREE.Vector3();
-const _wish = new THREE.Vector3();
 const _muzzle = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
 
@@ -47,329 +46,30 @@ function randRange(rng, a, b) {
   return a + rng() * (b - a);
 }
 
-function clampAngle(a) {
-  while (a > Math.PI) a -= Math.PI * 2;
-  while (a < -Math.PI) a += Math.PI * 2;
-  return a;
-}
-
-// Angle from `from` to `to` on the ground plane, as a yaw (0 = facing -z).
-function yawTo(from, to) {
-  return Math.atan2(-(to.x - from.x), -(to.z - from.z));
-}
-
-function dist2d(ax, az, bx, bz) {
-  const dx = ax - bx;
-  const dz = az - bz;
-  return Math.sqrt(dx * dx + dz * dz);
-}
-
-// Breadth-first search over world.waypoints. `queue`, `came` and `seen`
-// are reused scratch arrays owned by the caller. Returns a list of
-// waypoint ids from start to goal (inclusive), or null when unreachable.
-function bfsPath(waypoints, startId, goalId, queue, came, seen) {
-  if (startId === goalId) return [goalId];
-  queue.length = 0;
-  came.length = 0;
-  seen.length = 0;
-  for (let i = 0; i < waypoints.length; i++) {
-    came.push(-1);
-    seen.push(false);
-  }
-  queue.push(startId);
-  seen[startId] = true;
-  let head = 0;
-  while (head < queue.length) {
-    const cur = queue[head++];
-    if (cur === goalId) break;
-    const node = waypoints[cur];
-    if (!node) continue;
-    for (let i = 0; i < node.neighbors.length; i++) {
-      const nb = node.neighbors[i];
-      if (!seen[nb]) {
-        seen[nb] = true;
-        came[nb] = cur;
-        queue.push(nb);
-      }
-    }
-  }
-  if (!seen[goalId]) return null;
-  const path = [];
-  let cur = goalId;
-  while (cur !== -1) {
-    path.push(cur);
-    cur = came[cur];
-  }
-  path.reverse();
-  return path;
-}
-
-function nearestWaypoint(waypoints, x, z) {
-  let best = 0;
-  let bestD = Infinity;
-  for (let i = 0; i < waypoints.length; i++) {
-    const dx = waypoints[i].x - x;
-    const dz = waypoints[i].z - z;
-    const d = dx * dx + dz * dz;
-    if (d < bestD) {
-      bestD = d;
-      best = i;
-    }
-  }
-  return best;
-}
-
-// True when the segment from `a` to `b` passes within `radius` of `centre`.
-function segmentHitsSphere(a, b, centre, radius) {
-  _segA.subVectors(b, a);
-  const len2 = _segA.lengthSq();
-  if (len2 === 0) return a.distanceTo(centre) <= radius;
-  let t = _closest.subVectors(centre, a).dot(_segA) / len2;
-  t = t < 0 ? 0 : t > 1 ? 1 : t;
-  _closest.copy(a).addScaledVector(_segA, t);
-  return _closest.distanceTo(centre) <= radius;
-}
-
 export function createBots(scene, world, state) {
   const rng = state.rng;
   const waypoints = world.waypoints;
   const colliders = world.colliders;
-
-  // BFS scratch, shared by all bots (paths are planned one at a time).
-  const bfsQueue = [];
-  const bfsCame = [];
-  const bfsSeen = [];
+  const nav = createNavigator(world, state);
 
   const agents = [];
-  const darkMat = new THREE.MeshLambertMaterial({ color: 0x23211f });
-  const gunMat = new THREE.MeshLambertMaterial({ color: 0x191919 });
-
-  function teamMaterial(team) {
-    return new THREE.MeshLambertMaterial({
-      color: team === 'ember' ? PALETTE.ember : PALETTE.tide,
-    });
-  }
-
-  // --- mesh + agent construction -------------------------------------------
-  // Arms point forward-down and hold the gun; pivots sit at the shoulders/
-  // hips so the walk swing rotates around the joint, not the limb centre.
-  const ARM_FWD_X = -1.02; // base pitch of the forward-aimed arms
-  const ARM_IN_Z = 0.45; // inward tilt so both hands meet on the gun
-
-  function buildBot(id, name, team, spawn) {
-    const bodyMat = teamMaterial(team);
-    const skinMat = new THREE.MeshLambertMaterial({ color: 0xc99b6f });
-    const helmMat = new THREE.MeshLambertMaterial({ color: 0x2b2e33 });
-    const group = new THREE.Group();
-
-    // Torso: capsule, ~0.52 wide x 0.62 tall (hitbox size kept from v1).
-    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 0.1, 4, 12), bodyMat);
-    torso.position.y = 1.08;
-    // Neck + head: skin, deliberately a different colour/material from torso.
-    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.08, 0.12, 8), skinMat);
-    neck.position.y = 1.42;
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 16, 12), skinMat);
-    head.position.y = 1.58;
-    // Helmet: dark half-sphere cap + team-colour visor stripe across the front.
-    const helmet = new THREE.Mesh(
-      new THREE.SphereGeometry(0.175, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.55),
-      helmMat,
-    );
-    helmet.position.y = 1.59;
-    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.05, 0.05), bodyMat);
-    visor.position.set(0, 1.61, -0.155);
-    // Vest: dark front/back plates + pouch over the capsule torso.
-    const vestF = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.36, 0.09), darkMat);
-    vestF.position.set(0, 1.1, -0.24);
-    const vestB = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.36, 0.09), darkMat);
-    vestB.position.set(0, 1.1, 0.24);
-    const pouch = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.12, 0.05), darkMat);
-    pouch.position.set(0.1, 1.0, -0.3);
-    // Backpack + bedroll on the back.
-    const pack = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.42, 0.16), darkMat);
-    pack.position.set(0, 1.12, 0.32);
-    const roll = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.38, 8), darkMat);
-    roll.rotation.z = Math.PI / 2;
-    roll.position.set(0, 1.37, 0.32);
-
-    // Legs: pivot at the hip (top of the leg meets the torso bottom, no gap),
-    // boot at the bottom.
-    function makeLeg(x) {
-      const pivot = new THREE.Group();
-      pivot.position.set(x, 0.78, 0);
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.72, 0.22), darkMat);
-      leg.position.y = -0.36;
-      const boot = new THREE.Mesh(new THREE.BoxGeometry(0.21, 0.12, 0.3), darkMat);
-      boot.position.set(0, -0.72, -0.03);
-      pivot.add(leg, boot);
-      return pivot;
-    }
-    const legL = makeLeg(-0.14);
-    const legR = makeLeg(0.14);
-
-    // Arms: dark sleeves, pivot at the shoulder, angled forward-down and
-    // inward so the hands meet on the gun grip. Team stripe band on each
-    // upper arm (team colour reads against the dark sleeve).
-    function makeArm(x, inward) {
-      const pivot = new THREE.Group();
-      pivot.position.set(x, 1.32, 0);
-      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.52, 0.16), darkMat);
-      arm.position.y = -0.24;
-      const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.05, 0.18), bodyMat);
-      stripe.position.y = -0.12;
-      pivot.add(arm, stripe);
-      pivot.rotation.x = ARM_FWD_X;
-      pivot.rotation.z = inward;
-      return pivot;
-    }
-    const armL = makeArm(-0.31, ARM_IN_Z);
-    const armR = makeArm(0.31, -ARM_IN_Z);
-
-    // Rifle held in both hands at chest height, barrel forward (-z).
-    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.12, 0.72), gunMat);
-    gun.position.set(0.08, 1.06, -0.38);
-    const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.2), gunMat);
-    barrel.position.set(0.08, 1.07, -0.82);
-    const mag = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.16, 0.1), gunMat);
-    mag.position.set(0.08, 0.97, -0.32);
-    const stock = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.16), gunMat);
-    stock.position.set(0.08, 1.06, -0.04);
-
-    group.add(torso, neck, head, helmet, visor, vestF, vestB, pouch, pack, roll,
-      legL, legR, armL, armR, gun, barrel, mag, stock);
-    group.position.set(spawn.x, 0, spawn.z);
-    scene.add(group);
-
-    const mover = createMover(colliders);
-    mover.pos.set(spawn.x, 0, spawn.z);
-
-    const agent = {
-      id,
-      team,
-      isPlayer: false,
-      name,
-      pos: mover.pos,
-      vel: mover.vel,
-      yaw: team === 'ember' ? 0 : Math.PI, // ember faces north (-z), tide faces south (+z)
-      pitch: 0,
-      hp: 100,
-      armor: 0,
-      alive: true,
-      weaponId: 'pistol',
-      mag: 12,
-      reserve: 36,
-      grenades: { he: 0, smoke: 0 },
-      money: 800,
-      kills: 0,
-      deaths: 0,
-      mover,
-      mesh: group,
-      hitMeshes: [],
-      ai: null,
-      crouching: false,
-      onGround: true,
-    };
-    agent.mover.yaw = agent.yaw;
-    torso.userData = { agent, part: 'torso' };
-    head.userData = { agent, part: 'head' };
-    agent.hitMeshes = [torso, head];
-    agent.ai = {
-      state: 'hold', // push | hold | engage | plant | defuse | retreat | dead
-      lane: 'mid', // assigned lane: 'A' | 'B' | 'mid'
-      site: null, // assigned site for attackers
-      path: null, // waypoint ids
-      pathIdx: 0,
-      holdWp: 0,
-      scanYaw: 0,
-      target: null,
-      losTimer: randRange(rng, 0, 1 / LOS_HZ),
-      hasLos: false,
-      seenAt: -1, // state.time when the target was first seen
-      reactAt: -1, // state.time when the bot may open fire
-      burstLeft: 0,
-      burstPause: 0,
-      fireTimer: 0,
-      reloadLeft: 0,
-      lastHeard: null, // { x, z } of a heard shot, or null
-      hearWp: -1,
-      strafeDir: 1,
-      strafeTimer: 0,
-      walkPhase: 0,
-      fallT: 0,
-      grenadeThrown: false,
-      grenadeTimer: randRange(rng, 6, 14),
-      parts: { torso, head, legL, legR, armL, armR, gun },
-    };
-    return agent;
-  }
 
   // ids 1-4: Ember bots (player is id 0, fifth Ember). ids 5-9: Tide bots.
+  // Visual variant only: first bot of each team is the entry (thicker
+  // vest), last bot is the sniper (longer barrel + scope).
   for (let i = 0; i < 4; i++) {
     const spawn = world.spawns.ember[i + 1] || world.spawns.ember[0];
-    agents.push(buildBot(i + 1, EMBER_NAMES[i], 'ember', spawn));
+    agents.push(buildBot(scene, colliders, rng, i + 1, EMBER_NAMES[i], 'ember', spawn,
+      i === 0 ? 'entry' : i === 3 ? 'sniper' : 'standard'));
   }
   for (let i = 0; i < 5; i++) {
     const spawn = world.spawns.tide[i] || world.spawns.tide[0];
-    agents.push(buildBot(i + 5, TIDE_NAMES[i], 'tide', spawn));
+    agents.push(buildBot(scene, colliders, rng, i + 5, TIDE_NAMES[i], 'tide', spawn,
+      i === 0 ? 'entry' : i === 4 ? 'sniper' : 'standard'));
   }
   for (const a of agents) state.agents.push(a);
 
-  // --- waypoint helpers ------------------------------------------------------
-  function siteWaypoints(site) {
-    const s = world.sites[site];
-    const out = [];
-    for (const w of waypoints) {
-      if (dist2d(w.x, w.z, s.x, s.z) < 7) out.push(w.id);
-    }
-    return out;
-  }
-
-  function laneWaypoints(lane) {
-    const out = [];
-    for (const w of waypoints) {
-      if (lane === 'A' && w.x < -12) out.push(w.id);
-      else if (lane === 'B' && w.x > 12) out.push(w.id);
-      else if (lane === 'mid' && Math.abs(w.x) <= 12) out.push(w.id);
-    }
-    return out;
-  }
-
-  function planTo(agent, goalWp) {
-    const from = nearestWaypoint(waypoints, agent.pos.x, agent.pos.z);
-    const path = bfsPath(waypoints, from, goalWp, bfsQueue, bfsCame, bfsSeen);
-    if (path) {
-      agent.ai.path = path;
-      agent.ai.pathIdx = 0;
-      return true;
-    }
-    agent.ai.path = null;
-    return false;
-  }
-
-  function planToSite(agent, site) {
-    const spots = siteWaypoints(site);
-    if (!spots.length) return false;
-    const pick = spots[Math.floor(rng() * spots.length)];
-    return planTo(agent, pick);
-  }
-
-  function planToLane(agent, lane) {
-    const nodes = laneWaypoints(lane);
-    if (!nodes.length) return false;
-    // Walk to the far end of the lane for attackers (north, -z); defenders
-    // hold the mid node nearest the north connector (z = -6).
-    let goal = nodes[0];
-    let best = -Infinity;
-    for (const id of nodes) {
-      const w = waypoints[id];
-      const score = agent.team === state.attackSide ? -w.z : -Math.abs(w.z + 6);
-      if (score > best) {
-        best = score;
-        goal = id;
-      }
-    }
-    return planTo(agent, goal);
-  }
+  const hearing = createHearing(agents);
 
   // --- perception ------------------------------------------------------------
   function losBlocked(from, to, effects) {
@@ -448,7 +148,7 @@ export function createBots(scene, world, state) {
         _to.z += (rng() - 0.5) * 2 * spread;
         _to.normalize();
       }
-      const hit = hitscan(_eye, _to, weapon.range, ctx.shootables, state.agents);
+      const hit = hitscan(_eye, _to, weapon.range, ctx.shootables, state.agents, agent);
       _muzzle.copy(_eye).addScaledVector(_dir, 0.6);
       if (!hit) {
         _hitPoint.copy(_eye).addScaledVector(_to, weapon.range);
@@ -476,13 +176,8 @@ export function createBots(scene, world, state) {
       const d = agent.pos.distanceTo(ctx.player.pos);
       ctx.audio.shot(agent.weaponId, d);
     }
-    // Nearby bots hear the shot and investigate.
-    for (const other of agents) {
-      if (other === agent || !other.alive) continue;
-      if (other.pos.distanceTo(agent.pos) <= HEAR_RADIUS) {
-        other.ai.lastHeard = { x: agent.pos.x, z: agent.pos.z };
-      }
-    }
+    // Nearby bots hear the shot and investigate (not the shooter).
+    hearing.broadcastShot(agent.pos, agent);
   }
 
   function maybeThrowGrenade(agent, target, ctx) {
@@ -527,58 +222,9 @@ export function createBots(scene, world, state) {
     agent.mover.step(dt, 0, 0, 0, false, false);
   }
 
-  function syncMesh(agent, dt) {
-    const g = agent.mesh;
-    const ai = agent.ai;
-    const moving = ai.state === 'push' || ai.state === 'engage' || ai.state === 'retreat';
-    if (ai.state === 'dead') {
-      ai.fallT += dt;
-      const k = Math.min(1, ai.fallT / FALL_TIME);
-      g.position.copy(agent.pos);
-      // Fall, then a small decaying settle wobble once the body hits the ground.
-      const over = Math.max(0, ai.fallT - FALL_TIME);
-      const settle = over > 0 ? 0.06 * Math.sin(over * 9) * Math.exp(-over * 4) : 0;
-      g.rotation.x = -1.45 * k + settle;
-      g.rotation.y = agent.yaw;
-      g.rotation.z = 0;
-      return;
-    }
-    const swing = moving ? Math.sin(ai.walkPhase) * 0.45 : 0;
-    const bob = moving ? Math.abs(Math.sin(ai.walkPhase)) * 0.035 : 0;
-    g.position.copy(agent.pos);
-    g.position.y += bob;
-    g.rotation.x = moving ? 0.05 : 0; // slight forward lean while moving
-    g.rotation.y = agent.yaw;
-    g.rotation.z = moving ? Math.sin(ai.walkPhase) * 0.02 : 0; // gentle sway
-    ai.parts.legL.rotation.x = swing;
-    ai.parts.legR.rotation.x = -swing;
-    // Arms stay aimed forward on the gun; only a small sway with the stride.
-    ai.parts.armL.rotation.x = ARM_FWD_X + swing * 0.15;
-    ai.parts.armR.rotation.x = ARM_FWD_X - swing * 0.15;
-  }
-
   // --- round setup --------------------------------------------------------------
-  function assignTasks() {
-    const attackSide = state.attackSide;
-    const calledSite = rng() < 0.5 ? 'A' : 'B';
-    const attackers = agents.filter((a) => a.team === attackSide);
-    const defenders = agents.filter((a) => a.team !== attackSide);
-    // Attackers: carrier + 2 more to the called site, 2 mid. The carrier
-    // travels with the main group.
-    attackers.forEach((a, i) => {
-      a.ai.site = calledSite;
-      a.ai.lane = i < 3 ? calledSite : 'mid';
-    });
-    // Defenders: 2 A, 2 B, 1 mid.
-    defenders.forEach((a, i) => {
-      a.ai.site = null;
-      a.ai.lane = i < 2 ? 'A' : i < 4 ? 'B' : 'mid';
-    });
-    return { attackers, defenders, calledSite };
-  }
-
   function resetForRound() {
-    const { attackers, calledSite } = assignTasks();
+    const { attackers, calledSite } = assignTasks(agents, state.attackSide, rng);
     const attackSide = state.attackSide;
 
     for (const a of agents) {
@@ -607,6 +253,9 @@ export function createBots(scene, world, state) {
       a.armor = state.round >= 3 ? 50 : 0;
       a.grenades.he = rng() < 0.35 ? 1 : 0;
       a.grenades.smoke = rng() < 0.2 ? 1 : 0;
+      a.grenades.flash = rng() < 0.2 ? 1 : 0;
+      a.flashUntil = 0;
+      a.flashStrength = 0;
 
       const ai = a.ai;
       ai.state = 'push';
@@ -622,21 +271,26 @@ export function createBots(scene, world, state) {
       ai.reloadLeft = 0;
       ai.lastHeard = null;
       ai.hearWp = -1;
+      ai.radioHeard = false;
+      ai.radioRotated = false;
+      ai.radioContactAt = -99;
       ai.fallT = 0;
       ai.grenadeThrown = false;
       ai.grenadeTimer = randRange(rng, 6, 14);
       ai.walkPhase = 0;
+      ai.poseFreeze = false;
+      ai.posePhase = 0;
       ai.scanYaw = a.yaw;
       ai.strafeDir = rng() < 0.5 ? -1 : 1;
       ai.strafeTimer = 0;
 
       if (a.team === attackSide) {
-        if (a.ai.lane === 'mid') planToLane(a, 'mid');
-        else planToSite(a, calledSite);
+        if (a.ai.lane === 'mid') nav.planToLane(a, 'mid');
+        else nav.planToSite(a, calledSite);
       } else if (a.ai.lane === 'mid') {
-        planToLane(a, 'mid');
+        nav.planToLane(a, 'mid');
       } else {
-        planToSite(a, a.ai.lane);
+        nav.planToSite(a, a.ai.lane);
       }
       if (a.ai.state === 'push' && !a.ai.path) ai.state = 'hold';
       a.mesh.rotation.x = 0;
@@ -684,16 +338,6 @@ export function createBots(scene, world, state) {
     if (state.feed.length > 6) state.feed.length = 6;
   }
 
-  // External hook for main.js: a shot at `pos` is heard by bots nearby.
-  function hearShot(pos) {
-    for (const a of agents) {
-      if (!a.alive) continue;
-      if (a.pos.distanceTo(pos) <= HEAR_RADIUS) {
-        a.ai.lastHeard = { x: pos.x, z: pos.z };
-      }
-    }
-  }
-
   // --- per-bot brain ---------------------------------------------------------------
   function stepBot(agent, dt, ctx) {
     const ai = agent.ai;
@@ -706,7 +350,6 @@ export function createBots(scene, world, state) {
     const effects = ctx.effects;
     const bomb = state.bomb;
     const isAttacker = agent.team === state.attackSide;
-    const plantedSite = bomb.status === 'planted' || bomb.status === 'defusing' ? bomb.site : null;
 
     // Reload timer.
     if (ai.reloadLeft > 0) {
@@ -739,10 +382,10 @@ export function createBots(scene, world, state) {
           }
         }
         if (!closer) {
-          const wp = nearestWaypoint(waypoints, bomb.pos.x, bomb.pos.z);
+          const wp = nav.nearestWaypoint(bomb.pos.x, bomb.pos.z);
           if (ai.hearWp !== wp) {
             ai.hearWp = wp;
-            planTo(agent, wp);
+            nav.planTo(agent, wp);
             ai.state = 'push';
           }
         }
@@ -755,10 +398,10 @@ export function createBots(scene, world, state) {
     if (isAttacker && playerCarries && ctx.player && ctx.player.alive) {
       const d = dist2d(agent.pos.x, agent.pos.z, ctx.player.pos.x, ctx.player.pos.z);
       if (d > 6 && ai.state !== 'engage') {
-        const wp = nearestWaypoint(waypoints, ctx.player.pos.x, ctx.player.pos.z);
+        const wp = nav.nearestWaypoint(ctx.player.pos.x, ctx.player.pos.z);
         if (ai.hearWp !== wp) {
           ai.hearWp = wp;
-          planTo(agent, wp);
+          nav.planTo(agent, wp);
           ai.state = 'push';
         }
       }
@@ -776,6 +419,12 @@ export function createBots(scene, world, state) {
           ai.reactAt = state.time + randRange(rng, REACT_MIN, REACT_MAX);
           ai.burstLeft = 0;
           ai.burstPause = 0;
+          // First sight of this enemy: call it out on the radio, at most
+          // once every 8 s per bot so the feed never repeats itself.
+          if (ctx.radio && state.time - (ai.radioContactAt || -99) > 8) {
+            ai.radioContactAt = state.time;
+            ctx.radio.contact(agent, agent.ai.site);
+          }
         }
         ai.hasLos = true;
       } else {
@@ -784,25 +433,11 @@ export function createBots(scene, world, state) {
       }
     }
 
-    // Hearing: investigate the last heard shot.
-    if (ai.lastHeard && ai.state !== 'engage' && ai.state !== 'plant' && ai.state !== 'defuse') {
-      const wp = nearestWaypoint(waypoints, ai.lastHeard.x, ai.lastHeard.z);
-      if (ai.hearWp !== wp) {
-        ai.hearWp = wp;
-        planTo(agent, wp);
-        ai.state = 'push';
-      }
-      if (dist2d(agent.pos.x, agent.pos.z, ai.lastHeard.x, ai.lastHeard.z) < 2) {
-        ai.lastHeard = null;
-      }
-    }
-
+    // Hearing: investigate the last heard shot (hearing.js).
+    hearing.investigate(agent, nav.planTo, nav.nearestWaypoint, ctx.radio);
     // Once the bomb is planted, the planter stops channeling and holds the
-    // site like any other attacker (otherwise 'plant' would block engage).
-    if ((bomb.status === 'planted' || bomb.status === 'defusing') && ai.state === 'plant') {
-      ai.state = 'hold';
-      ai.holdWp = nearestWaypoint(waypoints, agent.pos.x, agent.pos.z);
-    }
+    // site like any other attacker (tactics.js).
+    clearPlantState(agent, bomb, nav);
 
     // --- state transitions ---
     if (ai.hasLos && ai.target && ai.target.alive && ai.state !== 'plant' && ai.state !== 'defuse') {
@@ -812,47 +447,18 @@ export function createBots(scene, world, state) {
       ai.state = ai.path ? 'push' : 'hold';
     }
 
-    // Carrier reaches the called site: channel (rounds.step owns progress).
+    // Carrier reaches the called site: channel (bomb.js owns progress).
     if (isAttacker && bomb.carrierId === agent.id && bomb.status === 'carried') {
-      const site = world.sites[bomb.site || ai.site || 'A'];
-      if (site && dist2d(agent.pos.x, agent.pos.z, site.x, site.z) <= site.r) {
-        ai.state = 'plant';
-      } else if (ai.state === 'plant') {
-        ai.state = 'push';
-      }
+      updateCarrier(agent, bomb, world);
     }
 
     // After the plant, attackers hold around the site; defenders rotate in.
-    if (plantedSite) {
-      if (isAttacker && ai.state !== 'engage' && ai.state !== 'dead') {
-        const site = world.sites[plantedSite];
-        const d = dist2d(agent.pos.x, agent.pos.z, site.x, site.z);
-        if (d > 9) {
-          if (ai.state !== 'retreat') {
-            ai.state = 'retreat';
-            planToSite(agent, plantedSite);
-          }
-        } else if (ai.state === 'retreat') {
-          ai.state = 'hold';
-          ai.holdWp = nearestWaypoint(waypoints, agent.pos.x, agent.pos.z);
-        }
-      } else if (!isAttacker && ai.state !== 'engage' && ai.state !== 'dead' && ai.state !== 'defuse') {
-        const d = bomb.pos ? dist2d(agent.pos.x, agent.pos.z, bomb.pos.x, bomb.pos.z) : Infinity;
-        if (d <= 2) {
-          ai.state = 'defuse';
-        } else if (ai.state !== 'retreat') {
-          ai.state = 'retreat';
-          const wp = nearestWaypoint(waypoints, bomb.pos.x, bomb.pos.z);
-          planTo(agent, wp);
-        }
-      }
-    }
-
+    postPlant(agent, bomb, world, nav, isAttacker, ctx.radio);
     // --- behaviour per state ---
     if (ai.state === 'push' || ai.state === 'retreat') {
       if (!followPath(agent, dt, BOT_SPEED)) {
         ai.state = 'hold';
-        ai.holdWp = nearestWaypoint(waypoints, agent.pos.x, agent.pos.z);
+        ai.holdWp = nav.nearestWaypoint(agent.pos.x, agent.pos.z);
         ai.scanYaw = agent.yaw;
       }
     } else if (ai.state === 'hold') {
@@ -865,6 +471,18 @@ export function createBots(scene, world, state) {
       const t = ai.target;
       agent.yaw = yawTo(agent.pos, t.pos);
       agent.mover.yaw = agent.yaw;
+      // Flashed: no shooting, turn away from the fight for a moment.
+      const flashed = (agent.flashUntil || 0) > state.time;
+      if (flashed) {
+        agent.yaw += dt * 2.2;
+        agent.mover.yaw = agent.yaw;
+        standStill(agent, dt);
+        ai.walkPhase += dt * 9;
+        agent.onGround = agent.mover.onGround;
+        agent.crouching = false;
+        syncMesh(agent, dt);
+        return;
+      }
       // Strafe sideways while fighting, flipping direction every so often.
       ai.strafeTimer -= dt;
       if (ai.strafeTimer <= 0) {
@@ -903,7 +521,7 @@ export function createBots(scene, world, state) {
         maybeThrowGrenade(agent, t, ctx);
       }
     } else if (ai.state === 'plant' || ai.state === 'defuse') {
-      // Stand still and channel; rounds.step advances bomb.progress and
+      // Stand still and channel; bomb.js advances bomb.progress and
       // resets it if this bot moves away or dies.
       standStill(agent, dt);
     }
@@ -919,5 +537,22 @@ export function createBots(scene, world, state) {
     }
   }
 
-  return { agents, step, resetForRound, onAgentKilled, hearShot };
+  // Staging hook for shots.js (E): freeze a bot mid-stride at `phase`
+  // (Math.PI/2 = legs at full opposite swing) and re-pose the mesh now,
+  // so the capture shows a walking bot instead of a standing one. An
+  // optional yaw re-aims the bot (the hold scan drifts yaw during settle).
+  // Live play never sets poseFreeze, so the sim is untouched.
+  function freezePose(agent, phase, yaw) {
+    if (!agent || !agent.ai) return;
+    agent.ai.poseFreeze = true;
+    agent.ai.posePhase = phase;
+    agent.ai.state = 'hold';
+    if (typeof yaw === 'number') {
+      agent.yaw = yaw;
+      agent.mover.yaw = yaw;
+    }
+    syncMesh(agent, 0);
+  }
+
+  return { agents, step, resetForRound, onAgentKilled, hearShot: hearing.broadcastShot, freezePose };
 }

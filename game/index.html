@@ -73,6 +73,24 @@
   }
   #damage-vignette.on, #damage-vignette.flash { opacity: 1; }
 
+  /* Flash-blind whiteout (grenade flash): opacity driven by hud.setFlash. */
+  #flash-overlay {
+    position: fixed; inset: 0;
+    background: #fff; opacity: 0; pointer-events: none;
+  }
+
+  /* Team plan + player role, under the top bar. */
+  #plan {
+    position: fixed; top: 58px; left: 50%; transform: translateX(-50%);
+    display: none;
+    font-family: var(--font-readout); font-size: 13px; font-weight: 700;
+    letter-spacing: .1em; color: var(--accent);
+    text-shadow: 0 1px 3px rgba(0,0,0,.9);
+    background: rgba(20,16,28,.55); padding: 3px 10px; border-radius: 4px;
+    border: 1px solid var(--hairline);
+  }
+  #plan.on { display: block; }
+
   /* Top bar: round, timer, score. */
   #topbar {
     position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
@@ -112,8 +130,16 @@
     border: 1px solid var(--hairline); border-radius: var(--radius-panel);
   }
 
+  #minimap-label {
+    position: fixed; top: 162px; right: 24px;
+    width: 180px; text-align: center;
+    font-size: 8px; font-weight: 700; letter-spacing: .02em;
+    color: var(--muted); text-shadow: 0 1px 2px rgba(0,0,0,.9);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
   #killfeed {
-    position: fixed; top: 172px; right: 24px;
+    position: fixed; top: 190px; right: 24px;
     display: flex; flex-direction: column; gap: 4px; align-items: flex-end;
     font-size: 13px; font-family: var(--font-readout);
     text-shadow: 0 1px 2px rgba(0,0,0,.9);
@@ -268,12 +294,27 @@
   /* Scoreboard. */
   #scoreboard {
     position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
-    width: min(560px, 92%); z-index: 8; display: none;
+    width: min(720px, 94%); z-index: 8; display: none;
     background: var(--panel); border: 1px solid var(--hairline);
     border-radius: var(--radius-panel); padding: 20px 24px;
   }
   #scoreboard.on { display: block; }
+  #scoreboard-banner {
+    display: none;
+    font-size: 20px; font-weight: 800; letter-spacing: .02em;
+    color: var(--accent); margin-bottom: 4px;
+  }
+  #scoreboard-banner.on { display: block; }
+  #scoreboard-streak {
+    display: none;
+    font-family: var(--font-readout); font-size: 13px; color: var(--muted);
+    margin-bottom: 10px;
+  }
+  #scoreboard-streak.on { display: block; }
   #scoreboard h2 { margin: 0 0 12px; font-size: 18px; }
+  #scoreboard-legend {
+    margin-top: 10px; font-size: 12px; color: var(--muted);
+  }
   #scoreboard table { width: 100%; border-collapse: collapse; font-family: var(--font-readout); font-size: 13px; }
   #scoreboard td, #scoreboard th { padding: 4px 6px; text-align: right; }
   #scoreboard td:first-child, #scoreboard th:first-child { text-align: left; }
@@ -291,6 +332,7 @@
 
 <div id="hud" aria-hidden="true">
   <div id="damage-vignette"></div>
+  <div id="flash-overlay"></div>
   <div id="crosshair"><i></i><i></i><i></i><i></i><span class="dot"></span></div>
   <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
 
@@ -300,6 +342,7 @@
     <span class="team-score" id="score-tide">0</span>
     <span id="round-num">ROUND 1/9</span>
   </div>
+  <div id="plan"></div>
 
   <div id="money-box">
     <div class="label">CREDITS</div>
@@ -308,6 +351,7 @@
   </div>
 
   <canvas id="minimap" width="180" height="140"></canvas>
+  <div id="minimap-label">CINDERQUAY — TERMINAL</div>
   <div id="killfeed"></div>
 
   <div id="vitals">
@@ -347,11 +391,14 @@
 </div>
 
 <div id="scoreboard">
+  <div id="scoreboard-banner"></div>
+  <div id="scoreboard-streak"></div>
   <h2>Scoreboard</h2>
   <table>
-    <thead><tr><th>Player</th><th>K</th><th>D</th><th>$</th></tr></thead>
+    <thead><tr><th>Name</th><th>Role</th><th>Team</th><th>K</th><th>D</th><th>DMG</th><th>HS%</th><th>MVP</th><th>Funds</th></tr></thead>
     <tbody id="scoreboard-body"></tbody>
   </table>
+  <div id="scoreboard-legend"></div>
 </div>
 
 <div id="overlay" class="overlay">
@@ -363,7 +410,7 @@
       <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</li>
       <li><kbd>Mouse</kbd> Look</li>
       <li><kbd>Click</kbd> Fire</li>
-      <li><kbd>1</kbd>–<kbd>4</kbd> Weapons / grenades</li>
+      <li><kbd>1</kbd>–<kbd>5</kbd> Weapons / grenades</li>
       <li><kbd>R</kbd> Reload</li>
       <li><kbd>Ctrl</kbd> Crouch</li>
       <li><kbd>E</kbd> Plant / defuse</li>

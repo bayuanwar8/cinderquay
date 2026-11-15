@@ -1,50 +1,27 @@
-// rounds.js — match flow, buy phase, economy and the bomb for CINDERQUAY.
-// Owns: buy timer (12 s), live timer (100 s), plant/defuse channels,
-// the planted-bomb timer, win checks, round/match end and buy().
-// Channel progress lives here and here only: bots merely walk into
-// position and set ai.state to 'plant'/'defuse'; this module advances
-// state.bomb.progress every tick and resets it on any interruption.
+// rounds.js — match flow, buy phase and win checks for CINDERQUAY.
+// Owns: buy timer (12 s), live timer (100 s), round/match end and buy().
+// The economy numbers live in economy.js, the bomb channels / timer /
+// fuse in bomb.js (created here with endRound as its hook); this module
+// only wires the round flow together.
 
-import { WEAPONS, GRENADES } from './weapons.js';
-import { addFeed, aliveAgents, damageAgent } from './state.js';
+import { WEAPONS } from './weapons.js';
+import { buy as buyItem, payoutRound, menuItems } from './economy.js';
+import { createBomb, BOMB_TIME } from './bomb.js';
+import { aliveAgents } from './state.js';
 
 const BUY_TIME = 12;
 const ROUND_TIME = 100;
-const PLANT_TIME = 3.5;
-const DEFUSE_TIME = 5;
-const BOMB_TIME = 35;
-const EXPLOSION_RADIUS = 6;
-const EXPLOSION_MAX_DAMAGE = 120;
 const ROUND_END_TIME = 4;
-const ARMOR_PRICE = 650;
-const ARMOR_AMOUNT = 50;
-const ARMOR_MAX = 100;
-const WIN_BONUS = 3250;
-const LOSS_BASE = 1900;
-const LOSS_PER_STREAK = 500;
-const LOSS_CAP = 2900;
-const PLANT_BONUS = 300;
-const PICKUP_RADIUS = 1.5;
-const DEFUSE_RADIUS = 2;
-
-function agentById(state, id) {
-  for (let i = 0; i < state.agents.length; i++) {
-    if (state.agents[i] && state.agents[i].id === id) return state.agents[i];
-  }
-  return null;
-}
-
-function dist2d(ax, az, bx, bz) {
-  const dx = ax - bx;
-  const dz = az - bz;
-  return Math.sqrt(dx * dx + dz * dz);
-}
+const MVP_BONUS = 300; // round MVP takes +$300 (B); other economy numbers live in economy.js/bomb.js
 
 export function createRounds(state, world) {
   let ctx = null; // latest step ctx { hud, audio, bots, player, effects, input, world }
   let needsSetup = false;
   let roundEndT = 0;
-  let beepT = 0;
+
+  // Bomb channels / fuse, with this module's endRound as the hook that
+  // fires when a defuse completes or the fuse runs out.
+  const bomb = createBomb(state, world, { endRound });
 
   const defendSide = () => (state.attackSide === 'ember' ? 'tide' : 'ember');
 
@@ -137,27 +114,15 @@ export function createRounds(state, world) {
     state.bomb.defuserId = -1;
     state.bomb.progress = 0;
     state.bomb.timer = BOMB_TIME;
-    beepT = 0;
+    bomb.resetBeep();
     needsSetup = true;
     const h = hud();
     if (h) {
       call(h.setScore, state.scores.ember, state.scores.tide);
       call(h.setRound, state.round);
       call(h.setBombStatus, '');
-      call(h.showBuyMenu, buyMenuItems(), playerAgent() ? playerAgent().money : 0, (id) => buy(playerAgent(), id));
+      call(h.showBuyMenu, menuItems(), playerAgent() ? playerAgent().money : 0, (id) => buy(playerAgent(), id));
     }
-  }
-
-  function buyMenuItems() {
-    return [
-      { id: 'rifle', name: WEAPONS.rifle.name, price: WEAPONS.rifle.price },
-      { id: 'smg', name: WEAPONS.smg.name, price: WEAPONS.smg.price },
-      { id: 'sniper', name: WEAPONS.sniper.name, price: WEAPONS.sniper.price },
-      { id: 'shotgun', name: WEAPONS.shotgun.name, price: WEAPONS.shotgun.price },
-      { id: 'he', name: GRENADES.he.name, price: GRENADES.he.price },
-      { id: 'smoke', name: GRENADES.smoke.name, price: GRENADES.smoke.price },
-      { id: 'armor', name: 'Kevlar vest', price: ARMOR_PRICE },
-    ];
   }
 
   function endRound(winner, reason) {
@@ -167,15 +132,25 @@ export function createRounds(state, world) {
     state.losses[winner] = 0;
     state.losses[loser] += 1;
     // Economy: winners +$3250, losers +$1900 plus $500 per consecutive
-    // loss, capped at +$2900 total. Kill money was already paid by
-    // damageAgent; the planter bonus is paid when the plant completes.
-    const lossBonus = Math.min(LOSS_BASE + LOSS_PER_STREAK * (state.losses[loser] - 1), LOSS_CAP);
-    for (const a of state.agents) {
-      if (!a) continue;
-      a.money += a.team === winner ? WIN_BONUS : lossBonus;
-    }
+    // loss, capped at +$2900 total (economy.js).
+    payoutRound(state, winner);
     state.roundWinner = winner;
     state.bomb.progress = 0;
+    // Win streaks for the scoreboard, and the round MVP: most kills on
+    // the winning team (ties broken by damage dealt) takes +$300.
+    state.streak[winner] = (state.streak[winner] || 0) + 1;
+    state.streak[loser] = 0;
+    let mvp = null;
+    for (const a of state.agents) {
+      if (!a || a.team !== winner) continue;
+      if (!mvp || (a.kills || 0) > (mvp.kills || 0) ||
+        ((a.kills || 0) === (mvp.kills || 0) && (a.dmg || 0) > (mvp.dmg || 0))) {
+        mvp = a;
+      }
+    }
+    state.mvpId = mvp ? mvp.id : -1;
+    state.mvpName = mvp ? mvp.name : '';
+    if (mvp && (mvp.kills || 0) > 0) mvp.money += MVP_BONUS;
     const h = hud();
     const a = audio();
     const reasonText =
@@ -211,153 +186,10 @@ export function createRounds(state, world) {
   }
 
   // --- buy -----------------------------------------------------------------------
+  // The buy rules live in economy.js; this is the rounds-facing delegate
+  // main.js calls (rounds.buy).
   function buy(agent, itemId) {
-    if (!agent || !agent.alive) return false;
-    if (state.phase !== 'buy') return false;
-    const weapon = WEAPONS[itemId];
-    const grenade = GRENADES[itemId];
-    let price = -1;
-    if (weapon) price = weapon.price;
-    else if (grenade) price = grenade.price;
-    else if (itemId === 'armor') price = ARMOR_PRICE;
-    else return false;
-    if (price < 0 || agent.money < price) return false;
-    if (itemId === 'armor' && agent.armor >= ARMOR_MAX) return false;
-
-    agent.money -= price;
-    if (weapon) {
-      agent.weaponId = itemId;
-      agent.mag = weapon.mag;
-      agent.reserve = weapon.reserve;
-    } else if (grenade) {
-      agent.grenades[itemId] = (agent.grenades[itemId] || 0) + 1;
-    } else {
-      agent.armor = Math.min(ARMOR_MAX, agent.armor + ARMOR_AMOUNT);
-    }
-    return true;
-  }
-
-  // --- bomb channels (owned entirely by step) --------------------------------------
-  function stepPlant(dt) {
-    const bomb = state.bomb;
-    if (bomb.status !== 'carried' && bomb.status !== 'planting') return;
-    const carrier = agentById(state, bomb.carrierId);
-    const site = bomb.site ? world.sites[bomb.site] : null;
-    let channeling = false;
-    if (carrier && carrier.alive && site) {
-      const inSite = dist2d(carrier.pos.x, carrier.pos.z, site.x, site.z) <= site.r;
-      if (inSite) {
-        if (carrier.isPlayer) {
-          channeling = !!(ctx && ctx.input && ctx.input.isDown('KeyE'));
-        } else {
-          channeling = carrier.ai && carrier.ai.state === 'plant';
-        }
-      }
-    }
-    const h = hud();
-    if (!channeling) {
-      if (bomb.status === 'planting') {
-        bomb.status = 'carried';
-        bomb.progress = 0;
-        if (h) call(h.setChannel, null, null);
-      }
-      return;
-    }
-    bomb.status = 'planting';
-    bomb.planterId = carrier.id;
-    bomb.progress += dt / PLANT_TIME;
-    if (h) call(h.setChannel, 'Planting the bomb', Math.min(1, bomb.progress));
-    if (bomb.progress < 1) return;
-
-    // Plant complete.
-    bomb.progress = 0;
-    bomb.status = 'planted';
-    bomb.timer = BOMB_TIME;
-    beepT = 0;
-    if (bomb.pos) bomb.pos.set(carrier.pos.x, 0.4, carrier.pos.z);
-    carrier.money += PLANT_BONUS;
-    addFeed(state, `${carrier.name} planted the bomb at site ${bomb.site}`, carrier.team);
-    if (h) {
-      call(h.setChannel, null, null);
-      call(h.setBombStatus, `BOMB PLANTED — ${Math.ceil(bomb.timer)}`);
-    }
-    const a = audio();
-    if (a) call(a.plantTick);
-  }
-
-  function stepDefuse(dt) {
-    const bomb = state.bomb;
-    if (bomb.status !== 'planted' && bomb.status !== 'defusing') return;
-    if (!bomb.pos) return;
-    const defTeam = defendSide();
-    let defuser = null;
-    for (const a of state.agents) {
-      if (!a || !a.alive || a.team !== defTeam) continue;
-      if (dist2d(a.pos.x, a.pos.z, bomb.pos.x, bomb.pos.z) > DEFUSE_RADIUS) continue;
-      if (a.isPlayer) {
-        if (ctx && ctx.input && ctx.input.isDown('KeyE')) defuser = a;
-      } else if (a.ai && a.ai.state === 'defuse') {
-        defuser = a;
-      }
-      if (defuser) break;
-    }
-    const h = hud();
-    if (!defuser) {
-      if (bomb.status === 'defusing') {
-        bomb.status = 'planted';
-        bomb.progress = 0;
-        if (h) call(h.setChannel, null, null);
-      }
-      return;
-    }
-    bomb.status = 'defusing';
-    bomb.defuserId = defuser.id;
-    bomb.progress += dt / DEFUSE_TIME;
-    if (h) call(h.setChannel, 'Defusing the bomb', Math.min(1, bomb.progress));
-    if (bomb.progress < 1) return;
-    bomb.progress = 0;
-    bomb.status = 'defused';
-    if (h) call(h.setChannel, null, null);
-    addFeed(state, `${defuser.name} defused the bomb`, defuser.team);
-    endRound(defTeam, 'defuse');
-  }
-
-  function stepBombTimer(dt) {
-    const bomb = state.bomb;
-    if (bomb.status !== 'planted' && bomb.status !== 'defusing') return;
-    bomb.timer -= dt;
-    const h = hud();
-    if (h) call(h.setBombStatus, `BOMB PLANTED — ${Math.max(0, Math.ceil(bomb.timer))}`);
-    // Beeps accelerate as the timer runs down.
-    beepT -= dt;
-    if (beepT <= 0) {
-      const a = audio();
-      if (a) call(a.beep);
-      const frac = Math.max(0, bomb.timer / BOMB_TIME);
-      beepT = 0.25 + frac * 0.85;
-    }
-    if (bomb.timer > 0) return;
-
-    // Detonation: linear falloff to every agent within 6 m, no team exception.
-    bomb.status = 'exploded';
-    if (bomb.pos) {
-      if (ctx && ctx.effects) call(ctx.effects.addExplosion, bomb.pos);
-      const a = audio();
-      const p = playerAgent();
-      if (a && p) call(a.explosion, p.pos.distanceTo(bomb.pos));
-      for (const target of state.agents) {
-        if (!target || !target.alive) continue;
-        const d = Math.sqrt(
-          (target.pos.x - bomb.pos.x) ** 2 +
-            (target.pos.y - bomb.pos.y) ** 2 +
-            (target.pos.z - bomb.pos.z) ** 2,
-        );
-        if (d > EXPLOSION_RADIUS) continue;
-        const dmg = EXPLOSION_MAX_DAMAGE * (1 - d / EXPLOSION_RADIUS);
-        damageAgent(state, target, dmg, false, null);
-      }
-    }
-    endRound(state.attackSide, 'bomb');
+    return buyItem(agent, itemId, state);
   }
 
   // --- per-frame ---------------------------------------------------------------------
@@ -385,6 +217,13 @@ export function createRounds(state, world) {
         }
         const side = state.attackSide === 'ember' ? 'Ember' : 'Tide';
         showBanner(`ROUND ${state.round}`, `${side} attacks — plant or defend the bomb`);
+        // Opening radio call: the plan for this round.
+        if (ctx.radio) {
+          const p = playerAgent();
+          const playerRole = state.attackSide === 'ember' ? 'Entry' : 'Anchor';
+          if (p) p.role = playerRole;
+          ctx.radio.plan(state.attackSide, state.bomb.site, playerRole);
+        }
       }
       return;
     }
@@ -400,40 +239,12 @@ export function createRounds(state, world) {
 
     if (state.phase !== 'live') return;
 
-    // Player picks up a dropped bomb by walking over it.
-    const bomb = state.bomb;
-    if (bomb.status === 'idle' && bomb.pos && p && p.alive) {
-      if (dist2d(p.pos.x, p.pos.z, bomb.pos.x, bomb.pos.z) <= PICKUP_RADIUS) {
-        bomb.status = 'carried';
-        bomb.carrierId = p.id;
-        if (h) call(h.setBombStatus, `BOMB CARRIED — take it to site ${bomb.site || 'A/B'}`);
-        addFeed(state, 'You picked up the bomb', 'ember');
-      }
-    }
-
-    // A dead carrier drops the bomb where they fell (covers the player
-    // carrier; bots report their own drop via bots.onAgentKilled).
-    if ((bomb.status === 'carried' || bomb.status === 'planting') && bomb.carrierId >= 0) {
-      const carrier = agentById(state, bomb.carrierId);
-      if (!carrier || !carrier.alive) {
-        bomb.status = 'idle';
-        bomb.carrierId = -1;
-        bomb.planterId = -1;
-        bomb.progress = 0;
-        if (carrier && bomb.pos) bomb.pos.set(carrier.pos.x, 0.4, carrier.pos.z);
-        if (h) call(h.setChannel, null, null);
-      }
-    }
-
     state.roundTimeLeft -= dt;
     if (h) call(h.setTimer, Math.max(0, Math.ceil(state.roundTimeLeft)));
 
-    stepPlant(dt);
+    // Bomb: pickup, dead-carrier drop, plant / defuse channels, fuse.
+    bomb.step(dt, ctx);
     if (state.phase !== 'live') return; // endRound may have fired
-    stepDefuse(dt);
-    if (state.phase !== 'live') return;
-    stepBombTimer(dt);
-    if (state.phase !== 'live') return;
 
     // Win checks.
     const attackersAlive = aliveAgents(state, state.attackSide).length;
@@ -442,11 +253,11 @@ export function createRounds(state, world) {
       endRound(state.attackSide, 'elimination');
       return;
     }
-    if (attackersAlive === 0 && bomb.status !== 'planted' && bomb.status !== 'defusing') {
+    if (attackersAlive === 0 && state.bomb.status !== 'planted' && state.bomb.status !== 'defusing') {
       endRound(defendSide(), 'elimination');
       return;
     }
-    if (state.roundTimeLeft <= 0 && bomb.status !== 'planted' && bomb.status !== 'defusing') {
+    if (state.roundTimeLeft <= 0 && state.bomb.status !== 'planted' && state.bomb.status !== 'defusing') {
       endRound(defendSide(), 'time');
     }
   }

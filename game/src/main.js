@@ -1,14 +1,21 @@
 // Cinderquay — boot and the one loop. A fixed 60 Hz simulation feeds a render
 // at the display's rate; the simulation never reads the frame clock.
-// ?shot=start|combat|plant|end with &seed=N arranges a deterministic frame,
+// ?shot=start|combat|plant|end|buy|scores with &seed=N arranges a deterministic frame,
 // renders it twice, then freezes and sets window.__shotReady.
 //
 // Where the systems live (this file only wires them together):
-//   rounds / buy / plant timers / win checks -> rounds.js (createRounds)
-//   bot AI: brain, pathfinding, shooting, plant/defuse tasks -> bots.js (createBots)
-//   weapons: WEAPONS/GRENADES tables, viewmodel rig, hitscan, grenades -> weapons.js
+//   rounds / buy timers / win checks -> rounds.js (createRounds)
+//   economy: buy catalogue + round rewards -> economy.js
+//   bomb: plant/defuse channels + fuse + device mesh -> bomb.js
+//   bot AI: brain + shooting -> bots.js (createBots); mesh in botmodels.js
+//   bot movement: waypoints + BFS -> nav.js; hearing -> hearing.js
+//   bot roles + site push + rotation -> tactics.js
+//   weapons: WEAPONS/GRENADES tables + hitscan -> weapons.js
+//   viewmodel: first-person rig + flash + recoil -> viewmodel.js
+//   grenades: HE/smoke throws + fuse -> grenades.js
 //   map, lighting, sites, spawns, waypoints, colliders -> world.js (createWorld)
-//   HUD: health/ammo/timer/score/minimap/kill feed/overlays/buy menu -> hud.js (createHud)
+//   HUD: health/ammo/timer/score/kill feed/overlays/buy menu -> hud.js (createHud)
+//   minimap canvas drawing -> minimap.js
 //   audio: synth WebAudio shots/hits/kills/UI -> audio.js (createAudio)
 //   player movement + collision -> player.js; input + pointer lock -> input.js
 //   round state + damage -> state.js; deterministic RNG -> rng.js
@@ -20,20 +27,27 @@ import { mulberry32 } from './rng.js';
 import { createWorld } from './world.js';
 import { createState, damageAgent } from './state.js';
 import { createPlayer } from './player.js';
-import { WEAPONS, GRENADES, createWeaponRig, hitscan, throwGrenade, stepGrenades } from './weapons.js';
+import { WEAPONS, GRENADES, hitscan } from './weapons.js';
+import { createWeaponRig } from './viewmodel.js';
+import { throwGrenade, stepGrenades } from './grenades.js';
+import { menuItemsForPlayer } from './economy.js';
+import { createBombDevice } from './bomb.js';
 import { createEffects } from './effects.js';
 import { createBots } from './bots.js';
 import { createRounds } from './rounds.js';
 import { createHud } from './hud.js';
 import { createAudio } from './audio.js';
 import { createInput } from './input.js';
+import { createRadio } from './radio.js';
+import { createZones } from './zones.js';
 import { setupShot } from './shots.js';
 
 const FIXED_STEP = 1 / 60;
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
 const seed = Number.parseInt(params.get('seed') ?? '1', 10) || 1;
-const isShot = shot === 'start' || shot === 'combat' || shot === 'plant' || shot === 'end';
+const isShot = shot === 'start' || shot === 'combat' || shot === 'plant' || shot === 'end' ||
+  shot === 'buy' || shot === 'scores';
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -53,6 +67,8 @@ const state = createState(seed);
 const effects = createEffects(scene);
 const hud = createHud();
 const audio = createAudio();
+const radio = createRadio(state);
+const zones = createZones(scene, world);
 const player = createPlayer(world.colliders);
 const rig = createWeaponRig(camera);
 const input = createInput(renderer.domElement, onLockChange);
@@ -60,11 +76,13 @@ const input = createInput(renderer.domElement, onLockChange);
 // The player is agent 0; bots.js appends agents 1..9 into the same array.
 const me = {
   id: 0, team: 'ember', isPlayer: true, name: 'You',
+  role: 'Entry',
   pos: player.state.pos, vel: player.state.vel,
   yaw: 0, pitch: 0, hp: 100, armor: 0, alive: true,
   weaponId: 'pistol', mag: 12, reserve: 36,
-  grenades: { he: 0, smoke: 0 },
-  money: 800, kills: 0, deaths: 0,
+  grenades: { he: 0, smoke: 0, flash: 0 },
+  money: 800, kills: 0, deaths: 0, dmg: 0, hsKills: 0,
+  defuseKit: false, flashUntil: 0, flashStrength: 0,
   mover: player.state, mesh: null, hitMeshes: [],
   ai: null, crouching: false, onGround: true,
 };
@@ -85,7 +103,7 @@ let paused = false;
 let started = false;
 let accumulator = 0;
 let lastTime = performance.now();
-let lastFeedCount = 0;
+let lastFeedHead = null; // newest state.feed entry already rendered
 let lastBanner = null;
 let lastScoreE = -1;
 let lastScoreT = -1;
@@ -99,32 +117,8 @@ let lastAlive = true;
 let slot = 'primary'; // primary | pistol | he | smoke
 
 // Planted/dropped bomb device (live play only; shot mode stages its own).
-// Cylinder body + cap + antenna + blinking lamp; names and visibility logic
-// are part of the contract — do not rename bombMesh/bombBody/bombLamp.
-const bombMesh = new THREE.Group();
-const bombBody = new THREE.Mesh(
-  new THREE.CylinderGeometry(0.24, 0.26, 0.3, 20),
-  new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.55, metalness: 0.35 }),
-);
-bombBody.position.y = 0.15;
-const bombCap = new THREE.Mesh(
-  new THREE.CylinderGeometry(0.13, 0.16, 0.08, 16),
-  new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.5, metalness: 0.5 }),
-);
-bombCap.position.y = 0.34;
-const bombAntenna = new THREE.Mesh(
-  new THREE.CylinderGeometry(0.015, 0.015, 0.3, 6),
-  new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.4, metalness: 0.8 }),
-);
-bombAntenna.position.set(0.18, 0.42, 0);
-const bombLamp = new THREE.Mesh(
-  new THREE.SphereGeometry(0.07, 8, 8),
-  new THREE.MeshStandardMaterial({ color: 0xff3b30, emissive: 0xff3b30, emissiveIntensity: 2 }),
-);
-bombLamp.position.y = 0.4;
-bombMesh.add(bombBody, bombCap, bombAntenna, bombLamp);
-bombMesh.visible = false;
-scene.add(bombMesh);
+// Built by bomb.js; the mesh names (bombMesh/bombBody/bombLamp) live there.
+const bombDevice = createBombDevice(scene);
 
 function syncCamera() {
   camera.position.set(me.pos.x, me.pos.y + player.state.eye, me.pos.z);
@@ -140,10 +134,48 @@ function equippedWeaponId() {
   return slot === 'pistol' ? 'pistol' : me.weaponId;
 }
 
+// Current flash blindness, 0 = clear, 1 = full whiteout. Fades linearly
+// over the flash duration from the strength the pop set.
+function playerBlind() {
+  if ((me.flashUntil || 0) <= state.time) return 0;
+  const remain = (me.flashUntil - state.time) / GRENADES.flash.duration;
+  return Math.max(0, Math.min(1, (me.flashStrength || 0) * remain));
+}
+
+// Team plan + the player's role this round, for the top-bar label.
+function currentPlan() {
+  if (state.phase !== 'buy' && state.phase !== 'live') return '';
+  const site = state.bomb.site || 'A';
+  if (state.attackSide === 'ember') return `PLAN: SPLIT ${site} — YOU: ENTRY`;
+  return `PLAN: HOLD ${site} — YOU: ANCHOR`;
+}
+
+// Scoreboard meta: round-end banner naming the winner + MVP, and the
+// current W/L streak per team (W from state.streak, L from state.losses).
+function scoreboardMeta() {
+  let banner = '';
+  if (state.roundWinner) {
+    const mvp = state.mvpName || '—';
+    banner = `${state.roundWinner.toUpperCase()} WIN — MVP ${mvp === 'You' ? 'You' : mvp}`;
+  }
+  const streakOf = (team) => {
+    const w = (state.streak && state.streak[team]) || 0;
+    if (w > 0) return 'W' + w;
+    const l = (state.losses && state.losses[team]) || 0;
+    if (l > 0) return 'L' + l;
+    return '—';
+  };
+  return {
+    banner,
+    streakText: `EMBER ${streakOf('ember')} · TIDE ${streakOf('tide')}`,
+  };
+}
+
 function applySlot() {
-  if (slot === 'he' || slot === 'smoke') {
+  if (slot === 'he' || slot === 'smoke' || slot === 'flash') {
     rig.grenadeOut(slot);
-    hud.setAmmo(me.grenades[slot], 0, slot === 'he' ? GRENADES.he.name : GRENADES.smoke.name);
+    const label = slot === 'he' ? GRENADES.he.name : slot === 'smoke' ? GRENADES.smoke.name : GRENADES.flash.name;
+    hud.setAmmo(me.grenades[slot], 0, label);
   } else {
     rig.equip(equippedWeaponId());
     hud.setAmmo(rig.state.mag, rig.state.reserve, WEAPONS[equippedWeaponId()].name);
@@ -153,6 +185,7 @@ function applySlot() {
     pistol: 'P9 Sidearm',
     he: me.grenades.he,
     smoke: me.grenades.smoke,
+    flash: me.grenades.flash,
   });
 }
 
@@ -165,7 +198,9 @@ function shootPlayer() {
   const weapon = WEAPONS[rig.state.weaponId];
   camera.getWorldDirection(direction);
   const speed = player.groundSpeed();
-  const spread = rig.spreadOf(speed, !player.state.onGround, player.state.crouching);
+  // A flash-blind shooter sprays wide: up to 3x spread at full whiteout.
+  const blind = playerBlind();
+  const spread = rig.spreadOf(speed, !player.state.onGround, player.state.crouching) * (1 + 2 * blind);
   let anyHit = false;
   let anyKill = false;
   for (let pellet = 0; pellet < weapon.pellets; pellet += 1) {
@@ -175,7 +210,7 @@ function shootPlayer() {
     tmpDir.z += (state.rng() * 2 - 1) * spread;
     tmpDir.normalize();
     camera.getWorldPosition(origin);
-    const hit = hitscan(origin, tmpDir, weapon.range, world.shootables, state.agents);
+    const hit = hitscan(origin, tmpDir, weapon.range, world.shootables, state.agents, me);
     muzzle.set(0.24, -0.16, -0.9).applyMatrix4(camera.matrixWorld);
     if (hit && hit.agent) {
       const dmg = weapon.damage * (hit.part === 'head' ? weapon.headMult : 1);
@@ -208,7 +243,7 @@ function shootPlayer() {
 
 function throwPlayerGrenade() {
   const kind = slot;
-  if (kind !== 'he' && kind !== 'smoke') return;
+  if (kind !== 'he' && kind !== 'smoke' && kind !== 'flash') return;
   if (me.grenades[kind] <= 0 || throwCooldown > 0) return;
   me.grenades[kind] -= 1;
   throwCooldown = 0.6;
@@ -217,27 +252,16 @@ function throwPlayerGrenade() {
   throwGrenade(state, origin, direction, kind, effects);
   audio.click();
   applySlot();
-  hud.setGrenades(me.grenades.he, me.grenades.smoke);
-}
-
-function buyItems() {
-  const items = [];
-  for (const id of ['rifle', 'smg', 'shotgun', 'sniper']) {
-    items.push({ id, name: WEAPONS[id].name, price: WEAPONS[id].price, key: id === 'rifle' ? '1' : id === 'smg' ? '2' : id === 'shotgun' ? '3' : '4', owned: me.weaponId === id });
-  }
-  items.push({ id: 'he', name: GRENADES.he.name, price: GRENADES.he.price, key: '5', owned: false, count: me.grenades.he });
-  items.push({ id: 'smoke', name: GRENADES.smoke.name, price: GRENADES.smoke.price, key: '6', owned: false, count: me.grenades.smoke });
-  items.push({ id: 'armor', name: 'Kevlar vest (+50 armor)', price: 650, key: '7', owned: me.armor >= 100 });
-  return items;
+  hud.setGrenades(me.grenades.he, me.grenades.smoke, me.grenades.flash);
 }
 
 function openBuyMenu() {
-  hud.showBuyMenu(buyItems(), me.money, (itemId) => {
+  hud.showBuyMenu(menuItemsForPlayer(me), me.money, (itemId) => {
     if (rounds.buy(me, itemId)) {
-      if (itemId === 'armor') {
-        // armor applied inside buy()
-      } else if (itemId === 'he' || itemId === 'smoke') {
-        hud.setGrenades(me.grenades.he, me.grenades.smoke);
+      if (itemId === 'armor' || itemId === 'defuse') {
+        // Applied inside buy(); nothing else to sync.
+      } else if (itemId === 'he' || itemId === 'smoke' || itemId === 'flash') {
+        hud.setGrenades(me.grenades.he, me.grenades.smoke, me.grenades.flash);
       } else {
         me.weaponId = itemId;
         rig.ammo[itemId] = { mag: WEAPONS[itemId].mag, reserve: WEAPONS[itemId].reserve };
@@ -290,23 +314,18 @@ function step(dt) {
   // be advanced by round timers (a roundEnd settle would startRound() and
   // reset every staged bot).
   if (state.phase === 'live') {
-    bots.step(dt, { player: me, shootables: world.shootables, effects, audio, world });
+    bots.step(dt, { player: me, shootables: world.shootables, effects, audio, world, radio });
   }
   if (!isShot && (state.phase === 'buy' || state.phase === 'live' || state.phase === 'roundEnd')) {
-    rounds.step(dt, { hud, audio, bots, player: me, effects, input, world });
+    rounds.step(dt, { hud, audio, bots, player: me, effects, input, world, radio });
   }
   stepGrenades(state, dt, world, effects, audio);
   effects.step(dt, state.time);
   world.update(dt, state.time);
+  zones.update(dt, state);
 
   // Bomb device visibility (live play only; shot mode stages its own).
-  if (!isShot && state.bomb.pos && (state.bomb.status === 'planted' || state.bomb.status === 'defusing' || state.bomb.status === 'idle')) {
-    bombMesh.visible = true;
-    bombMesh.position.copy(state.bomb.pos);
-    bombLamp.material.emissiveIntensity = state.bomb.status === 'idle' ? 0.6 : (Math.sin(state.time * 6) > 0 ? 2.5 : 0.4);
-  } else {
-    bombMesh.visible = false;
-  }
+  if (!isShot) bombDevice.sync(state, state.time);
 
   // Grenade throw + reload + slot keys (edge-triggered).
   if (state.phase === 'live' && input.state.locked) {
@@ -314,16 +333,17 @@ function step(dt) {
     if (input.consumePressed('Digit2')) { slot = 'pistol'; applySlot(); }
     if (input.consumePressed('Digit3') && me.grenades.he > 0) { slot = 'he'; applySlot(); }
     if (input.consumePressed('Digit4') && me.grenades.smoke > 0) { slot = 'smoke'; applySlot(); }
+    if (input.consumePressed('Digit5') && me.grenades.flash > 0) { slot = 'flash'; applySlot(); }
     if (input.consumePressed('KeyG')) throwPlayerGrenade();
     if (input.consumePressed('KeyR') && (slot === 'primary' || slot === 'pistol')) rig.reload();
     if (input.consumePressed('KeyB') && state.phase === 'buy') openBuyMenu();
   }
   if (input.state.firing && state.phase === 'live' && input.state.locked && me.alive) {
-    if (slot === 'he' || slot === 'smoke') throwPlayerGrenade();
+    if (slot === 'he' || slot === 'smoke' || slot === 'flash') throwPlayerGrenade();
     else if (WEAPONS[rig.state.weaponId].auto || state.time - shotFiredAt > 0.25) shootPlayer();
   }
-  if (input.consumePressed('Tab')) hud.setScoreboard(state.agents);
-  if (input.state.keys.has('Tab')) hud.setScoreboard(state.agents);
+  if (input.consumePressed('Tab')) hud.setScoreboard(state.agents, scoreboardMeta());
+  if (input.state.keys.has('Tab')) hud.setScoreboard(state.agents, scoreboardMeta());
   else hud.hideScoreboard();
 
   // Death / revive transitions.
@@ -337,6 +357,8 @@ function step(dt) {
 
   // Sync HUD from state (hud caches, so unchanged values skip DOM writes).
   hud.setHealth(me.hp, me.armor);
+  hud.setPlan(currentPlan());
+  hud.setFlash(playerBlind());
   // Ammo comes from the rig so a finished reload shows up without a shot.
   if (slot === 'primary' || slot === 'pistol') {
     me.mag = rig.state.mag;
@@ -357,9 +379,24 @@ function step(dt) {
     lastRound = state.round;
     hud.setRound(lastRound);
   }
-  if (state.feed.length !== lastFeedCount) {
-    for (let i = lastFeedCount; i < state.feed.length; i += 1) hud.feed(state.feed[i].text, state.feed[i].cls);
-    lastFeedCount = state.feed.length;
+  // Feed sync by newest-entry reference, not by length: addFeed caps the
+  // array at 6, so once the cap is hit the length stops growing and a
+  // length index would re-render the oldest line and drop newer ones.
+  // New entries sit ahead of lastFeedHead; if the head was pushed out by
+  // the cap, skip the batch rather than duplicate lines.
+  {
+    const feed = state.feed;
+    let fresh = 0;
+    if (lastFeedHead === null) {
+      fresh = feed.length;
+    } else {
+      while (fresh < feed.length && feed[fresh] !== lastFeedHead) fresh += 1;
+      if (fresh === feed.length && feed.length > 0) fresh = -1;
+    }
+    if (fresh > 0) {
+      for (let i = fresh - 1; i >= 0; i -= 1) hud.feed(feed[i].text, feed[i].cls);
+    }
+    if (feed.length > 0) lastFeedHead = feed[0];
   }
   if (state.banner !== lastBanner) {
     lastBanner = state.banner;
@@ -397,10 +434,10 @@ function step(dt) {
       const dist = tmpDir.length();
       if (dist > 70) continue;
       tmpDir.normalize();
-      const hit = hitscan(origin, tmpDir, dist + 0.5, world.shootables, state.agents);
+      const hit = hitscan(origin, tmpDir, dist + 0.5, world.shootables, state.agents, me);
       if (hit && hit.agent === agent) visibleEnemies.add(agent.id);
     }
-    hud.drawMinimap(state.agents, world.sites, state.bomb, me.yaw, visibleEnemies);
+    hud.drawMinimap(state.agents, world.sites, state.bomb, me.yaw, visibleEnemies, world.colliders);
   }
 
   // Damage vignette fades with health.
@@ -447,13 +484,15 @@ function runShot(name) {
   hud.setRound(state.round);
   hud.setMoney(me.money);
   hud.setHealth(me.hp, me.armor);
-  if (slot === 'he' || slot === 'smoke') {
-    hud.setAmmo(me.grenades[slot], 0, slot === 'he' ? GRENADES.he.name : GRENADES.smoke.name);
+  hud.setPlan(currentPlan());
+  zones.update(0, state);
+  if (slot === 'he' || slot === 'smoke' || slot === 'flash') {
+    hud.setAmmo(me.grenades[slot], 0, slot === 'he' ? GRENADES.he.name : slot === 'smoke' ? GRENADES.smoke.name : GRENADES.flash.name);
   } else {
     hud.setAmmo(rig.state.mag, rig.state.reserve, WEAPONS[rig.state.weaponId].name);
   }
-  hud.setGrenades(me.grenades.he, me.grenades.smoke);
-  hud.drawMinimap(state.agents, world.sites, state.bomb, me.yaw, visibleEnemies);
+  hud.setGrenades(me.grenades.he, me.grenades.smoke, me.grenades.flash);
+  hud.drawMinimap(state.agents, world.sites, state.bomb, me.yaw, visibleEnemies, world.colliders);
   paintTwiceThenReady();
 }
 
@@ -529,7 +568,7 @@ window.addEventListener('resize', () => {
 syncCamera();
 applySlot();
 hud.setHealth(100, 0);
-hud.setGrenades(0, 0);
+hud.setGrenades(0, 0, 0);
 if (isShot) {
   runShot(shot);
 } else {
