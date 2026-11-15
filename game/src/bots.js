@@ -151,26 +151,92 @@ export function createBots(scene, world, state) {
   }
 
   // --- mesh + agent construction -------------------------------------------
+  // Arms point forward-down and hold the gun; pivots sit at the shoulders/
+  // hips so the walk swing rotates around the joint, not the limb centre.
+  const ARM_FWD_X = -1.02; // base pitch of the forward-aimed arms
+  const ARM_IN_Z = 0.45; // inward tilt so both hands meet on the gun
+
   function buildBot(id, name, team, spawn) {
     const bodyMat = teamMaterial(team);
+    const skinMat = new THREE.MeshLambertMaterial({ color: 0xc99b6f });
+    const helmMat = new THREE.MeshLambertMaterial({ color: 0x2b2e33 });
     const group = new THREE.Group();
 
-    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.62, 0.3), bodyMat);
+    // Torso: capsule, ~0.52 wide x 0.62 tall (hitbox size kept from v1).
+    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 0.1, 4, 12), bodyMat);
     torso.position.y = 1.08;
-    const head = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.3), bodyMat);
+    // Neck + head: skin, deliberately a different colour/material from torso.
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.08, 0.12, 8), skinMat);
+    neck.position.y = 1.42;
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 16, 12), skinMat);
     head.position.y = 1.58;
-    const legL = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.62, 0.22), darkMat);
-    legL.position.set(-0.14, 0.31, 0);
-    const legR = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.62, 0.22), darkMat);
-    legR.position.set(0.14, 0.31, 0);
-    const armL = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.55, 0.16), bodyMat);
-    armL.position.set(-0.34, 1.12, -0.06);
-    const armR = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.55, 0.16), bodyMat);
-    armR.position.set(0.34, 1.12, -0.06);
-    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.12, 0.72), gunMat);
-    gun.position.set(0.18, 1.18, -0.28); // forward is -z at yaw 0, so the barrel points ahead
+    // Helmet: dark half-sphere cap + team-colour visor stripe across the front.
+    const helmet = new THREE.Mesh(
+      new THREE.SphereGeometry(0.175, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.55),
+      helmMat,
+    );
+    helmet.position.y = 1.59;
+    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.05, 0.05), bodyMat);
+    visor.position.set(0, 1.61, -0.155);
+    // Vest: dark front/back plates + pouch over the capsule torso.
+    const vestF = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.36, 0.09), darkMat);
+    vestF.position.set(0, 1.1, -0.24);
+    const vestB = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.36, 0.09), darkMat);
+    vestB.position.set(0, 1.1, 0.24);
+    const pouch = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.12, 0.05), darkMat);
+    pouch.position.set(0.1, 1.0, -0.3);
+    // Backpack + bedroll on the back.
+    const pack = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.42, 0.16), darkMat);
+    pack.position.set(0, 1.12, 0.32);
+    const roll = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.38, 8), darkMat);
+    roll.rotation.z = Math.PI / 2;
+    roll.position.set(0, 1.37, 0.32);
 
-    group.add(torso, head, legL, legR, armL, armR, gun);
+    // Legs: pivot at the hip (top of the leg meets the torso bottom, no gap),
+    // boot at the bottom.
+    function makeLeg(x) {
+      const pivot = new THREE.Group();
+      pivot.position.set(x, 0.78, 0);
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.72, 0.22), darkMat);
+      leg.position.y = -0.36;
+      const boot = new THREE.Mesh(new THREE.BoxGeometry(0.21, 0.12, 0.3), darkMat);
+      boot.position.set(0, -0.72, -0.03);
+      pivot.add(leg, boot);
+      return pivot;
+    }
+    const legL = makeLeg(-0.14);
+    const legR = makeLeg(0.14);
+
+    // Arms: dark sleeves, pivot at the shoulder, angled forward-down and
+    // inward so the hands meet on the gun grip. Team stripe band on each
+    // upper arm (team colour reads against the dark sleeve).
+    function makeArm(x, inward) {
+      const pivot = new THREE.Group();
+      pivot.position.set(x, 1.32, 0);
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.52, 0.16), darkMat);
+      arm.position.y = -0.24;
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.05, 0.18), bodyMat);
+      stripe.position.y = -0.12;
+      pivot.add(arm, stripe);
+      pivot.rotation.x = ARM_FWD_X;
+      pivot.rotation.z = inward;
+      return pivot;
+    }
+    const armL = makeArm(-0.31, ARM_IN_Z);
+    const armR = makeArm(0.31, -ARM_IN_Z);
+
+    // Rifle held in both hands at chest height, barrel forward (-z).
+    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.12, 0.72), gunMat);
+    gun.position.set(0.08, 1.06, -0.38);
+    const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.2), gunMat);
+    barrel.position.set(0.08, 1.07, -0.82);
+    const mag = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.16, 0.1), gunMat);
+    mag.position.set(0.08, 0.97, -0.32);
+    const stock = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.16), gunMat);
+    stock.position.set(0.08, 1.06, -0.04);
+
+    group.add(torso, neck, head, helmet, visor, vestF, vestB, pouch, pack, roll,
+      legL, legR, armL, armR, gun, barrel, mag, stock);
     group.position.set(spawn.x, 0, spawn.z);
     scene.add(group);
 
@@ -464,22 +530,31 @@ export function createBots(scene, world, state) {
   function syncMesh(agent, dt) {
     const g = agent.mesh;
     const ai = agent.ai;
-    g.position.copy(agent.pos);
+    const moving = ai.state === 'push' || ai.state === 'engage' || ai.state === 'retreat';
     if (ai.state === 'dead') {
       ai.fallT += dt;
       const k = Math.min(1, ai.fallT / FALL_TIME);
-      g.rotation.x = -1.45 * k;
+      g.position.copy(agent.pos);
+      // Fall, then a small decaying settle wobble once the body hits the ground.
+      const over = Math.max(0, ai.fallT - FALL_TIME);
+      const settle = over > 0 ? 0.06 * Math.sin(over * 9) * Math.exp(-over * 4) : 0;
+      g.rotation.x = -1.45 * k + settle;
       g.rotation.y = agent.yaw;
+      g.rotation.z = 0;
       return;
     }
-    g.rotation.x = 0;
-    g.rotation.y = agent.yaw;
-    const moving = ai.state === 'push' || ai.state === 'engage';
     const swing = moving ? Math.sin(ai.walkPhase) * 0.45 : 0;
+    const bob = moving ? Math.abs(Math.sin(ai.walkPhase)) * 0.035 : 0;
+    g.position.copy(agent.pos);
+    g.position.y += bob;
+    g.rotation.x = moving ? 0.05 : 0; // slight forward lean while moving
+    g.rotation.y = agent.yaw;
+    g.rotation.z = moving ? Math.sin(ai.walkPhase) * 0.02 : 0; // gentle sway
     ai.parts.legL.rotation.x = swing;
     ai.parts.legR.rotation.x = -swing;
-    ai.parts.armL.rotation.x = -swing * 0.6;
-    ai.parts.armR.rotation.x = swing * 0.6;
+    // Arms stay aimed forward on the gun; only a small sway with the stride.
+    ai.parts.armL.rotation.x = ARM_FWD_X + swing * 0.15;
+    ai.parts.armR.rotation.x = ARM_FWD_X - swing * 0.15;
   }
 
   // --- round setup --------------------------------------------------------------

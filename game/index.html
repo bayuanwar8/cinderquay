@@ -199,7 +199,9 @@
   .overlay {
     position: fixed; inset: 0; display: grid; place-items: center;
     padding: 24px; z-index: 10;
-    background: rgba(16, 14, 26, .82);
+    /* Dim enough to keep the panel readable, light enough that the dusk
+       yard behind it still shows — the map is part of the screenshot. */
+    background: rgba(16, 14, 26, .55);
   }
   .overlay[hidden] { display: none; }
   .panel {

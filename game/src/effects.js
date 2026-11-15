@@ -3,6 +3,12 @@
 // out round-robin; step() only moves and fades what is already alive, so the
 // render path never allocates.
 import * as THREE from 'three';
+import { mulberry32 } from './rng.js';
+
+// Fixed-seed stream for visual-only jitter (smoke puff offsets/sizes,
+// spark velocities). The sim calls these in a fixed order, so the stream
+// — and therefore every screenshot — is identical on every load.
+const fxRng = mulberry32(0xeffec7);
 
 const MAX_TRACERS = 24;
 const MAX_SPARKS = 16;
@@ -22,13 +28,13 @@ export function createEffects(scene) {
   // expiry at once even though its signature carries no time argument.
   let clock = 0;
 
-  // --- Tracers: thin stretched boxes, additive, one material each so the
+  // --- Tracers: thick stretched boxes, additive, one material each so the
   // colour can be set per shot without touching a shared material. ---
   const tracers = [];
   for (let i = 0; i < MAX_TRACERS; i++) {
     const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(0.02, 0.02, 1),
-      new THREE.MeshBasicMaterial({ color: 0xffb347, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }),
+      new THREE.BoxGeometry(0.05, 0.05, 1),
+      new THREE.MeshBasicMaterial({ color: 0xffb347, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false }),
     );
     mesh.visible = false;
     scene.add(mesh);
@@ -36,11 +42,11 @@ export function createEffects(scene) {
   }
   let tracerNext = 0;
 
-  // --- Impact sparks: small bright boxes that fly out and die fast. ---
+  // --- Impact sparks: bright boxes that fly out and die fast. ---
   const sparks = [];
   for (let i = 0; i < MAX_SPARKS; i++) {
     const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(0.03, 0.03, 0.03),
+      new THREE.BoxGeometry(0.06, 0.06, 0.06),
       new THREE.MeshBasicMaterial({ color: 0xffd27a, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false }),
     );
     mesh.visible = false;
@@ -54,11 +60,11 @@ export function createEffects(scene) {
   for (let i = 0; i < MAX_EXPLOSIONS; i++) {
     const mesh = new THREE.Mesh(
       new THREE.SphereGeometry(1, 12, 8),
-      new THREE.MeshBasicMaterial({ color: 0xff7a2f, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false }),
+      new THREE.MeshBasicMaterial({ color: 0xff7a2f, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }),
     );
     mesh.visible = false;
     scene.add(mesh);
-    const light = new THREE.PointLight(0xff7a2f, 0, 14);
+    const light = new THREE.PointLight(0xff7a2f, 0, 20);
     scene.add(light);
     explosions.push({ mesh, light, life: 0 });
   }
@@ -74,15 +80,15 @@ export function createEffects(scene) {
     for (let j = 0; j < SPHERES_PER_CLOUD; j++) {
       const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(1, 10, 8),
-        new THREE.MeshStandardMaterial({ color: 0x9a938a, transparent: true, opacity: 0.28, depthWrite: false }),
+        new THREE.MeshStandardMaterial({ color: 0x9a938a, transparent: true, opacity: 0.4, depthWrite: false }),
       );
       mesh.visible = false;
       scene.add(mesh);
       // Fixed offsets inside the cloud so the puffs keep their shape.
       puffs.push({
         mesh,
-        off: new THREE.Vector3((Math.random() - 0.5) * 1.2, (Math.random() - 0.5) * 0.5 + 0.3, (Math.random() - 0.5) * 1.2),
-        size: 0.55 + Math.random() * 0.5,
+        off: new THREE.Vector3((fxRng() - 0.5) * 1.2, (fxRng() - 0.5) * 0.5 + 0.3, (fxRng() - 0.5) * 1.2),
+        size: 0.7 + fxRng() * 0.6,
       });
     }
     smokePuffs.push(puffs);
@@ -99,7 +105,7 @@ export function createEffects(scene) {
     t.mesh.lookAt(to);
     t.mesh.scale.set(1, 1, Math.max(0.01, len));
     t.mesh.material.color.set(color);
-    t.mesh.material.opacity = 0.9;
+    t.mesh.material.opacity = 1;
     t.mesh.visible = true;
     t.life = TRACER_LIFE;
   }
@@ -112,8 +118,8 @@ export function createEffects(scene) {
     s.mesh.material.opacity = 1;
     s.mesh.visible = true;
     // Visual-only jitter: it cannot change gameplay.
-    s.vel.set(Math.random() - 0.5, Math.random() * 0.8 + 0.2, Math.random() - 0.5)
-      .normalize().multiplyScalar(2.5);
+    s.vel.set(fxRng() - 0.5, fxRng() * 0.8 + 0.2, fxRng() - 0.5)
+      .normalize().multiplyScalar(3.5);
     s.life = SPARK_LIFE;
   }
 
@@ -121,11 +127,11 @@ export function createEffects(scene) {
     const e = explosions[explosionNext];
     explosionNext = (explosionNext + 1) % MAX_EXPLOSIONS;
     e.mesh.position.copy(point);
-    e.mesh.scale.setScalar(0.3);
-    e.mesh.material.opacity = 0.8;
+    e.mesh.scale.setScalar(0.5);
+    e.mesh.material.opacity = 0.9;
     e.mesh.visible = true;
     e.light.position.copy(point);
-    e.light.intensity = 40;
+    e.light.intensity = 80;
     e.life = EXPLOSION_LIFE;
   }
 
@@ -139,8 +145,10 @@ export function createEffects(scene) {
     for (let j = 0; j < puffs.length; j++) {
       const p = puffs[j];
       p.mesh.position.copy(point).addScaledVector(p.off, radius * 0.6);
-      p.mesh.scale.setScalar(radius * p.size);
-      p.mesh.material.opacity = 0.28;
+      // Squashed vertically so the cloud reads as ground-hugging smoke,
+      // not a stack of soap bubbles.
+      p.mesh.scale.set(radius * p.size, radius * p.size * 0.55, radius * p.size);
+      p.mesh.material.opacity = 0.4;
       p.mesh.visible = true;
     }
   }
@@ -154,7 +162,7 @@ export function createEffects(scene) {
       if (tr.life <= 0) {
         tr.mesh.visible = false;
       } else {
-        tr.mesh.material.opacity = 0.9 * (tr.life / TRACER_LIFE);
+        tr.mesh.material.opacity = 1 * (tr.life / TRACER_LIFE);
       }
     }
 
@@ -180,9 +188,9 @@ export function createEffects(scene) {
         e.mesh.visible = false;
         e.light.intensity = 0;
       } else {
-        e.mesh.scale.setScalar(0.3 + age * 3.2);
-        e.mesh.material.opacity = 0.8 * (1 - age);
-        e.light.intensity = 40 * (1 - age);
+        e.mesh.scale.setScalar(0.5 + age * 4.5);
+        e.mesh.material.opacity = 0.9 * (1 - age);
+        e.light.intensity = 80 * (1 - age);
       }
     }
 
@@ -195,7 +203,7 @@ export function createEffects(scene) {
       }
       // Fade out over the last second of the cloud's life.
       const remain = cloud.until - t;
-      const opacity = remain < 1 ? 0.28 * remain : 0.28;
+      const opacity = remain < 1 ? 0.4 * remain : 0.4;
       for (let j = 0; j < puffs.length; j++) {
         puffs[j].mesh.material.opacity = opacity;
       }

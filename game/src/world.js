@@ -3,9 +3,18 @@
 // Ember spawns south (z = +20), Tide spawns north (z = -20); sites A (west)
 // and B (east) sit along the north edge. Three north-south lanes (A, mid, B)
 // are crossed by two east-west connectors. Every solid box is both a movement
-// collider and a bullet stopper; painted markings are flat and never collide.
+// collider and a bullet stopper; painted markings live in the ground texture.
 import * as THREE from 'three';
+import { mulberry32 } from './rng.js';
 import { PALETTE } from './palette.js';
+import {
+  createGroundTexture,
+  createContainerTexture,
+  createConcreteTexture,
+  createCrateTexture,
+  createGlowTexture,
+  createHazeTexture,
+} from './textures.js';
 
 const CONTAINER_COLORS = ['rust', 'teal', 'mustard', 'olive'];
 const BARREL_COLORS = ['rust', 'mustard', 'teal'];
@@ -86,16 +95,54 @@ export function createWorld(scene) {
       metalness: name === 'steel' ? 0.35 : 0.04,
     });
   }
-  // Dark silhouette material for the crane outside the north wall.
+  // Dark silhouette material for the crane + distant skyline.
   const silhouette = new THREE.MeshStandardMaterial({
     color: new THREE.Color('#232830'),
     roughness: 0.95,
     metalness: 0.1,
   });
+  // Near-black tyre rubber.
+  const tyreMat = new THREE.MeshStandardMaterial({
+    color: new THREE.Color('#1b1b1e'),
+    roughness: 0.96,
+    metalness: 0,
+  });
+
+  // Textured materials (procedural canvas textures, built once).
+  const groundTex = createGroundTexture();
+  const groundTopMat = new THREE.MeshStandardMaterial({
+    map: groundTex, roughness: 0.96, metalness: 0.0,
+  });
+  const containerTex = createContainerTexture();
+  const containerMats = {};
+  for (const key of CONTAINER_COLORS) {
+    containerMats[key] = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(PALETTE[key]),
+      map: containerTex, roughness: 0.82, metalness: 0.18,
+    });
+  }
+  const concreteTex = createConcreteTexture();
+  const concreteMat = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(PALETTE.concrete),
+    map: concreteTex, roughness: 0.94, metalness: 0.02,
+  });
+  const crateTex = createCrateTexture();
+  const crateMats = {};
+  for (const key of CONTAINER_COLORS) {
+    crateMats[key] = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(PALETTE[key]),
+      map: crateTex, roughness: 0.9, metalness: 0.02,
+    });
+  }
+  const glowTex = createGlowTexture();
 
   // Solid box: mesh + Box3 collider + bullet stopper. y is the centre height.
-  function solid(w, h, d, x, y, z, colorKey) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), materials[colorKey]);
+  // matOverride swaps the flat palette material for a textured one.
+  function solid(w, h, d, x, y, z, colorKey, matOverride) {
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(w, h, d),
+      matOverride || materials[colorKey],
+    );
     mesh.position.set(x, y, z);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
@@ -105,10 +152,12 @@ export function createWorld(scene) {
     return mesh;
   }
 
-  // Flat painted marking: sits 0.02 above the asphalt, never a collider.
-  function marking(w, d, x, z, colorKey) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, 0.02, d), materials[colorKey]);
-    mesh.position.set(x, 0.011, z);
+  // Visual-only box: no collider, no bullet stopper (silhouette variety).
+  function visualBox(w, h, d, x, y, z, mat, ry = 0, rz = 0, rx = 0) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    mesh.position.set(x, y, z);
+    mesh.rotation.set(rx, ry, rz);
+    mesh.castShadow = true;
     mesh.receiveShadow = true;
     group.add(mesh);
     return mesh;
@@ -134,43 +183,76 @@ export function createWorld(scene) {
 
   // ---- ground + perimeter -------------------------------------------------
   // The floor is one big box, not a plane, so the yard itself is a collider.
-  solid(65.2, 0.5, 49.2, 0, -0.25, 0, 'ground');
-  solid(65.2, 5, 0.6, 0, 2.5, -24.3, 'concrete');   // north wall
-  solid(65.2, 5, 0.6, 0, 2.5, 24.3, 'concrete');    // south wall
-  solid(0.6, 5, 49.2, -32.3, 2.5, 0, 'concrete');   // west wall
-  solid(0.6, 5, 49.2, 32.3, 2.5, 0, 'concrete');    // east wall
+  // Top face (+y, material index 2) carries the asphalt + markings texture.
+  {
+    const groundMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(65.2, 0.5, 49.2),
+      [materials.ground, materials.ground, groundTopMat,
+        materials.ground, materials.ground, materials.ground],
+    );
+    groundMesh.position.set(0, -0.25, 0);
+    groundMesh.receiveShadow = true;
+    group.add(groundMesh);
+    colliders.push(new THREE.Box3().setFromObject(groundMesh));
+    shootables.push(groundMesh);
+  }
+  // Perimeter walls carry the concrete panel texture.
+  solid(65.2, 5, 0.6, 0, 2.5, -24.3, 'concrete', concreteMat);   // north wall
+  solid(65.2, 5, 0.6, 0, 2.5, 24.3, 'concrete', concreteMat);    // south wall
+  solid(0.6, 5, 49.2, -32.3, 2.5, 0, 'concrete', concreteMat);   // west wall
+  solid(0.6, 5, 49.2, 32.3, 2.5, 0, 'concrete', concreteMat);    // east wall
 
-  // ---- containers (6 x 2.6 x 2.6) -----------------------------------------
+  // Wall top trim (cap) + pilasters proud of the inner face, every ~8 m.
+  for (const z of [-24.3, 24.3]) {
+    visualBox(65.2, 0.28, 0.9, 0, 5.08, z, concreteMat);
+    for (let x = -28; x <= 28; x += 8) {
+      visualBox(1.0, 5.0, 0.18, x, 2.5, z > 0 ? 23.95 : -23.95, concreteMat);
+    }
+  }
+  for (const x of [-32.3, 32.3]) {
+    visualBox(0.9, 0.28, 49.2, x, 5.08, 0, concreteMat);
+    for (let z = -20; z <= 20; z += 8) {
+      visualBox(0.18, 5.0, 1.0, x > 0 ? 31.95 : -31.95, 2.5, z, concreteMat);
+    }
+  }
+
+  // ---- containers (6 x 2.6 x 2.6, corrugated texture) ----------------------
   // Mid block: long axis along x, splitting mid into a west and an east door.
-  solid(6, 2.6, 2.6, 0, 1.3, 0, 'rust');
+  solid(6, 2.6, 2.6, 0, 1.3, 0, 'rust', containerMats.rust);
   // Lane-side cover, set back from the lane centre so the lane stays open.
-  solid(2.6, 2.6, 6, -23.5, 1.3, 6, 'teal');       // A lane west
-  solid(2.6, 2.6, 6, 23.5, 1.3, 6, 'mustard');     // B lane east
+  solid(2.6, 2.6, 6, -23.5, 1.3, 6, 'teal', containerMats.teal);       // A lane west
+  solid(2.6, 2.6, 6, 23.5, 1.3, 6, 'mustard', containerMats.mustard);  // B lane east
   // South connector flanks.
-  solid(6, 2.6, 2.6, -12, 1.3, 10.5, 'rust');
-  solid(6, 2.6, 2.6, 12, 1.3, 10.5, 'olive');
+  solid(6, 2.6, 2.6, -12, 1.3, 10.5, 'rust', containerMats.rust);
+  solid(6, 2.6, 2.6, 12, 1.3, 10.5, 'olive', containerMats.olive);
   // North connector flanks.
-  solid(6, 2.6, 2.6, -12, 1.3, -8.5, 'teal');
-  solid(6, 2.6, 2.6, 12, 1.3, -8.5, 'mustard');
+  solid(6, 2.6, 2.6, -12, 1.3, -8.5, 'teal', containerMats.teal);
+  solid(6, 2.6, 2.6, 12, 1.3, -8.5, 'mustard', containerMats.mustard);
   // Site A cover: west wall of the site + north edge.
-  solid(2.6, 2.6, 6, -26, 1.3, -14, 'teal');
-  solid(6, 2.6, 2.6, -17.5, 1.3, -19, 'rust');
+  solid(2.6, 2.6, 6, -26, 1.3, -14, 'teal', containerMats.teal);
+  solid(6, 2.6, 2.6, -17.5, 1.3, -19, 'rust', containerMats.rust);
   // Site B cover, mirrored.
-  solid(2.6, 2.6, 6, 26, 1.3, -14, 'mustard');
-  solid(6, 2.6, 2.6, 17.5, 1.3, -19, 'olive');
+  solid(2.6, 2.6, 6, 26, 1.3, -14, 'mustard', containerMats.mustard);
+  solid(6, 2.6, 2.6, 17.5, 1.3, -19, 'olive', containerMats.olive);
   // Spawn cover, tucked against the back walls behind the spawn lines.
-  solid(6, 2.6, 2.6, -14, 1.3, 22, 'rust');
-  solid(6, 2.6, 2.6, 14, 1.3, 22, 'teal');
-  solid(6, 2.6, 2.6, -14, 1.3, -22, 'mustard');
-  solid(6, 2.6, 2.6, 14, 1.3, -22, 'olive');
+  solid(6, 2.6, 2.6, -14, 1.3, 22, 'rust', containerMats.rust);
+  solid(6, 2.6, 2.6, 14, 1.3, 22, 'teal', containerMats.teal);
+  solid(6, 2.6, 2.6, -14, 1.3, -22, 'mustard', containerMats.mustard);
+  solid(6, 2.6, 2.6, 14, 1.3, -22, 'olive', containerMats.olive);
   // Mid-lane side cover, offset from the lane centre.
-  solid(6, 2.6, 2.6, 6, 1.3, 14, 'olive');
-  solid(6, 2.6, 2.6, -6, 1.3, -12, 'teal');
+  solid(6, 2.6, 2.6, 6, 1.3, 14, 'olive', containerMats.olive);
+  solid(6, 2.6, 2.6, -6, 1.3, -12, 'teal', containerMats.teal);
   // Two stacked second layers for height variety.
-  solid(2.6, 2.6, 6, -23.5, 3.9, 6, 'mustard');
-  solid(2.6, 2.6, 6, 23.5, 3.9, 6, 'rust');
+  solid(2.6, 2.6, 6, -23.5, 3.9, 6, 'mustard', containerMats.mustard);
+  solid(2.6, 2.6, 6, 23.5, 3.9, 6, 'rust', containerMats.rust);
 
-  // ---- crates (1.2^3) ------------------------------------------------------
+  // Visual-only tilted / stacked containers (colliders stay the old boxes).
+  visualBox(6, 2.6, 2.6, -29, 1.45, 16, containerMats.rust, 0.35, 0.05);
+  visualBox(6, 2.6, 2.6, -8, 1.35, -22.3, containerMats.teal, -0.2, -0.05);
+  visualBox(6, 2.6, 2.6, 29, 1.3, -16.5, containerMats.olive, 0.12, 0);
+  visualBox(6, 2.6, 2.6, 29, 3.9, -16.5, containerMats.mustard, 0.12, 0);
+
+  // ---- crates (1.2^3, wood-plank texture) ----------------------------------
   const crateSpots = [
     [-8, 16], [-6.6, 16], [8, 16], [9.4, 16],
     [-26, 2], [-26, 3.4], [26, 2], [26, 3.4],
@@ -181,11 +263,12 @@ export function createWorld(scene) {
     [-16, -10], [16, -10],
   ];
   crateSpots.forEach(([x, z], i) => {
-    solid(1.2, 1.2, 1.2, x, 0.6, z, CONTAINER_COLORS[i % CONTAINER_COLORS.length]);
+    const key = CONTAINER_COLORS[i % CONTAINER_COLORS.length];
+    solid(1.2, 1.2, 1.2, x, 0.6, z, key, crateMats[key]);
   });
   // Two crates stacked on a partner for a taller crouch block.
-  solid(1.2, 1.2, 1.2, -8, 1.8, 16, 'mustard');
-  solid(1.2, 1.2, 1.2, 26, 1.8, 2, 'rust');
+  solid(1.2, 1.2, 1.2, -8, 1.8, 16, 'mustard', crateMats.mustard);
+  solid(1.2, 1.2, 1.2, 26, 1.8, 2, 'rust', crateMats.rust);
 
   // ---- barrel clusters ------------------------------------------------------
   const barrelClusters = [
@@ -197,25 +280,113 @@ export function createWorld(scene) {
     barrel(cx - 0.2, cz + 1.0, BARREL_COLORS[2]);
   }
 
-  // ---- painted markings (flat, never colliders) -----------------------------
-  // Yellow centre lines down the three lanes.
-  marking(0.4, 28, -20, 2, 'mustard');
-  marking(0.4, 28, 0, 2, 'mustard');
-  marking(0.4, 28, 20, 2, 'mustard');
-  // Connector dashes.
-  marking(30, 0.4, 0, 8, 'mustard');
-  marking(30, 0.4, 0, -6, 'mustard');
-  // Site pads + centre squares.
-  marking(6.8, 6.8, -22, -14, 'mustard');
-  marking(6.8, 6.8, 22, -14, 'mustard');
-  marking(2.2, 2.2, -22, -14, 'ember');
-  marking(2.2, 2.2, 22, -14, 'tide');
-  // Spawn zone strips.
-  marking(17, 0.5, 0, 20, 'ember');
-  marking(17, 0.5, 0, -20, 'tide');
+  // ---- silhouette variety: pipes, pallets, tyres, puddles, fence ------------
+  function pipe(r, len, x, y, z, rx, rz) {
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 10), materials.steel);
+    mesh.position.set(x, y, z);
+    mesh.rotation.set(rx, 0, rz);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+    return mesh;
+  }
+  // Horizontal runs hugging the walls + a vertical cluster.
+  pipe(0.16, 26, 8, 0.45, -23.85, 0, Math.PI / 2);
+  pipe(0.11, 26, 8, 0.75, -23.85, 0, Math.PI / 2);
+  pipe(0.16, 20, -31.85, 0.5, -6, Math.PI / 2, 0);
+  pipe(0.16, 16, 31.85, 0.5, 10, Math.PI / 2, 0);
+  pipe(0.12, 2.4, -31.85, 1.2, 8, 0, 0);
+  pipe(0.18, 2.4, -31.85, 1.2, 8.5, 0, 0);
+  pipe(0.12, 1.8, -31.85, 0.9, 8.9, 0, 0);
+
+  // Pallets: flat slatted base, visual only.
+  function pallet(x, z, ry) {
+    const p = new THREE.Group();
+    const base = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.1, 1.0), crateMats.olive);
+    base.position.y = 0.08;
+    p.add(base);
+    for (const dz of [-0.36, 0, 0.36]) {
+      const slat = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.04, 0.14), crateMats.mustard);
+      slat.position.set(0, 0.16, dz);
+      p.add(slat);
+    }
+    p.position.set(x, 0, z);
+    p.rotation.y = ry;
+    p.traverse((m) => { m.castShadow = true; m.receiveShadow = true; });
+    group.add(p);
+  }
+  pallet(-10.5, 14.5, 0.2);
+  pallet(10.5, -14.5, -0.4);
+  pallet(-27, 8, 0.9);
+
+  // Tyre stacks (torus rings), visual only.
+  function tyreStack(x, z, lean) {
+    for (let i = 0; i < 3; i++) {
+      const tyre = new THREE.Mesh(new THREE.TorusGeometry(0.32, 0.13, 8, 18), tyreMat);
+      tyre.position.set(x, 0.14 + i * 0.26, z);
+      tyre.rotation.x = Math.PI / 2;
+      tyre.castShadow = true;
+      tyre.receiveShadow = true;
+      group.add(tyre);
+    }
+    if (lean) {
+      const tyre = new THREE.Mesh(new THREE.TorusGeometry(0.32, 0.13, 8, 18), tyreMat);
+      tyre.position.set(x + 0.75, 0.45, z + 0.2);
+      tyre.rotation.set(Math.PI / 2, 0, 0.5);
+      tyre.castShadow = true;
+      group.add(tyre);
+    }
+  }
+  tyreStack(-28.5, 8, true);
+  tyreStack(28.5, -2, false);
+  tyreStack(4, 18.5, true);
+
+  // Puddles: low-roughness discs catching the sun as specular streaks.
+  const puddleMat = new THREE.MeshStandardMaterial({
+    color: new THREE.Color('#232a33'), roughness: 0.06, metalness: 0.55,
+  });
+  for (const [px, pz, pr] of [[10, -4, 1.6], [-12, 12, 2.0], [24, 4, 1.3], [-24, -2, 1.2], [2, -16, 1.4]]) {
+    const puddle = new THREE.Mesh(new THREE.CircleGeometry(pr, 24), puddleMat);
+    puddle.rotation.x = -Math.PI / 2;
+    puddle.position.set(px, 0.015, pz);
+    puddle.receiveShadow = true;
+    group.add(puddle);
+  }
+
+  // Fence rails + posts along the top of the north and south walls.
+  const railMat = materials.steel;
+  for (const z of [-24.3, 24.3]) {
+    for (const ry of [5.55, 5.95]) {
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(65.2, 0.06, 0.06), railMat);
+      rail.position.set(0, ry, z);
+      group.add(rail);
+    }
+  }
+  for (const x of [-32.3, 32.3]) {
+    for (const ry of [5.55, 5.95]) {
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 49.2), railMat);
+      rail.position.set(x, ry, 0);
+      group.add(rail);
+    }
+  }
+  {
+    const postGeo = new THREE.BoxGeometry(0.07, 1.1, 0.07);
+    const spots = [];
+    for (let x = -32; x <= 32; x += 2.2) { spots.push([x, 5.45, -24.3]); spots.push([x, 5.45, 24.3]); }
+    for (let z = -24; z <= 24; z += 2.2) { spots.push([-32.3, 5.45, z]); spots.push([32.3, 5.45, z]); }
+    const posts = new THREE.InstancedMesh(postGeo, railMat, spots.length);
+    const m4 = new THREE.Matrix4();
+    spots.forEach(([x, y, z], i) => {
+      m4.makeTranslation(x, y, z);
+      posts.setMatrixAt(i, m4);
+    });
+    posts.instanceMatrix.needsUpdate = true;
+    group.add(posts);
+  }
 
   // ---- site beacons (blink in update) ---------------------------------------
   const beaconMats = [];
+  const beaconGlows = [];
   for (const [bx, bz] of [[-25.2, -11.2], [25.2, -11.2]]) {
     const pole = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.6, 0.12), materials.steel);
     pole.position.set(bx, 0.8, bz);
@@ -229,10 +400,19 @@ export function createWorld(scene) {
     const tip = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.34), mat);
     tip.position.set(bx, 1.75, bz);
     group.add(tip);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex, color: new THREE.Color(PALETTE.accent),
+      transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending,
+      depthWrite: false, fog: false,
+    }));
+    glow.position.set(bx, 1.75, bz);
+    glow.scale.set(1.4, 1.4, 1);
+    group.add(glow);
     beaconMats.push(mat);
+    beaconGlows.push(glow);
   }
 
-  // ---- crane silhouette + low sun, outside the walls -------------------------
+  // ---- crane silhouette, outside the north wall ------------------------------
   const crane = new THREE.Group();
   function craneBox(w, h, d, x, y, z) {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), silhouette);
@@ -240,14 +420,14 @@ export function createWorld(scene) {
     crane.add(mesh);
     return mesh;
   }
-  craneBox(1.4, 15, 1.4, -28, 7.5, -28);          // mast
-  craneBox(1.4, 15, 1.4, -23, 7.5, -28);          // second leg
-  craneBox(6.4, 1.2, 1.2, -25.5, 14.6, -28);      // mast cap
-  craneBox(18, 1, 1, -24, 13.8, -28);             // jib reaching east
-  craneBox(7, 0.9, 0.9, -32.5, 13.8, -28);        // counter-jib west
-  craneBox(0.12, 5, 0.12, -18, 11.2, -28);        // hanging cable
-  craneBox(0.8, 0.8, 0.8, -18, 8.4, -28);         // hook block
-  craneBox(2.2, 1.6, 1.6, -27, 12.6, -28);        // operator cab
+  craneBox(1.8, 20, 1.8, -28, 10, -28);          // mast
+  craneBox(1.8, 20, 1.8, -23, 10, -28);          // second leg
+  craneBox(6.8, 1.5, 1.5, -25.5, 19.6, -28);     // mast cap
+  craneBox(24, 1.2, 1.2, -22, 18.8, -28);        // jib reaching east
+  craneBox(9, 1.1, 1.1, -34.5, 18.8, -28);       // counter-jib west
+  craneBox(0.12, 6.5, 0.12, -14, 15.2, -28);     // hanging cable
+  craneBox(0.9, 0.9, 0.9, -14, 11.6, -28);       // hook block
+  craneBox(2.4, 1.8, 1.8, -27, 17.6, -28);       // operator cab
   group.add(crane);
 
   // Crane warning light, blinking in update().
@@ -258,24 +438,137 @@ export function createWorld(scene) {
     roughness: 0.4,
   });
   const craneLight = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 8), craneLightMat);
-  craneLight.position.set(-15.2, 14.3, -28);
+  craneLight.position.set(-11.5, 19.3, -28);
   group.add(craneLight);
 
-  // Low orange sun disc on the western horizon; fog off so it stays vivid.
-  const sunMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(PALETTE.horizon), fog: false });
-  const sun = new THREE.Mesh(new THREE.CircleGeometry(4.5, 32), sunMat);
-  sun.position.set(-70, 7, -6);
-  sun.lookAt(0, 7, 0);
-  group.add(sun);
+  // ---- sky: gradient dome + stars + sun glow + haze + skyline --------------
+  // The dome IS the background (no solid scene.background any more).
+  const sunDir = new THREE.Vector3(-40, 12, 8).normalize();
+  const skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    fog: false,
+    uniforms: { sunDir: { value: sunDir } },
+    vertexShader: `
+      varying vec3 vDir;
+      void main() {
+        vDir = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: `
+      varying vec3 vDir;
+      uniform vec3 sunDir;
+      void main() {
+        vec3 d = normalize(vDir);
+        float h = clamp(d.y, -0.08, 1.0);
+        vec3 top = vec3(0.06, 0.08, 0.19);
+        vec3 mid = vec3(0.24, 0.13, 0.27);
+        vec3 hor = vec3(0.42, 0.19, 0.21);
+        vec3 col = mix(hor, mid, smoothstep(0.0, 0.22, h));
+        col = mix(col, top, smoothstep(0.18, 0.65, h));
+        float s = max(dot(d, sunDir), 0.0);
+        col += vec3(1.0, 0.45, 0.15) * pow(s, 6.0) * 0.55;
+        col += vec3(1.0, 0.75, 0.45) * pow(s, 40.0) * 0.9;
+        col = mix(vec3(0.15, 0.09, 0.11), col, smoothstep(-0.08, 0.01, d.y));
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+  });
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(175, 32, 20), skyMat);
+  group.add(sky);
+
+  // Stars on the upper dome. Seeded (fixed) so the sky is identical on
+  // every load — Math.random() here made screenshots differ run to run.
+  {
+    const starRng = mulberry32(0xc1d3a9);
+    const count = 450;
+    const pos = new Float32Array(count * 3);
+    let i = 0;
+    while (i < count) {
+      const u = starRng() * 2 - 1;
+      const a = starRng() * Math.PI * 2;
+      const r = Math.sqrt(1 - u * u);
+      const y = u;
+      if (y < 0.12) continue; // keep stars above the horizon band
+      pos[i * 3] = r * Math.cos(a) * 170;
+      pos[i * 3 + 1] = y * 170;
+      pos[i * 3 + 2] = r * Math.sin(a) * 170;
+      i++;
+    }
+    const starGeo = new THREE.BufferGeometry();
+    starGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({
+      color: new THREE.Color('#cfd8ff'), size: 1.6, sizeAttenuation: false,
+      transparent: true, opacity: 0.85, fog: false, depthWrite: false,
+    }));
+    group.add(stars);
+  }
+
+  // Sun glow: big soft halo + bright core, additive sprites at the sun azimuth.
+  const glowPos = sunDir.clone().multiplyScalar(165);
+  const halo = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: glowTex, color: new THREE.Color('#ff7a2f'),
+    transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending,
+    depthWrite: false, fog: false,
+  }));
+  halo.position.copy(glowPos);
+  halo.scale.set(95, 95, 1);
+  group.add(halo);
+  const core = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: glowTex, color: new THREE.Color('#ffd9a0'),
+    transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending,
+    depthWrite: false, fog: false,
+  }));
+  core.position.copy(glowPos);
+  core.scale.set(30, 30, 1);
+  group.add(core);
+
+  // Horizon haze ring hugging the dome just above the walls.
+  {
+    const hazeTex = createHazeTexture();
+    const haze = new THREE.Mesh(
+      new THREE.CylinderGeometry(150, 150, 26, 48, 1, true),
+      new THREE.MeshBasicMaterial({
+        map: hazeTex, transparent: true, side: THREE.BackSide,
+        depthWrite: false, fog: false,
+      }),
+    );
+    haze.position.y = 6;
+    group.add(haze);
+  }
+
+  // Distant skyline silhouettes outside the walls (fog fades them in).
+  const skylineSpots = [
+    [-45, -42, 12, 18, 10], [-30, -50, 10, 26, 10], [-12, -44, 14, 14, 10],
+    [5, -52, 10, 22, 10], [22, -46, 12, 16, 10], [38, -50, 10, 24, 10],
+    [52, -40, 12, 12, 10], [-40, 44, 12, 15, 10], [-15, 48, 10, 20, 10],
+    [12, 45, 14, 13, 10], [35, 48, 10, 18, 10], [-48, -10, 10, 20, 12],
+    [-50, 15, 10, 14, 12], [48, -5, 10, 22, 12], [50, 18, 10, 15, 12],
+  ];
+  for (const [bx, bz, bw, bh, bd] of skylineSpots) {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), silhouette);
+    b.position.set(bx, bh / 2, bz);
+    group.add(b);
+  }
+  // A second distant crane on the east horizon.
+  for (const [w, h, d, x, y, z] of [
+    [1.2, 22, 1.2, 58, 11, -42], [14, 0.9, 0.9, 55, 21, -42],
+    [5, 0.8, 0.8, 64, 21, -42], [1.8, 1.4, 1.4, 57, 19.4, -42],
+  ]) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), silhouette);
+    m.position.set(x, y, z);
+    group.add(m);
+  }
 
   // ---- lighting ---------------------------------------------------------------
-  scene.background = new THREE.Color(PALETTE.sky);
+  // No solid background: the sky dome is the background. Fog colour matches
+  // the dome's horizon band so distant walls fade into the sky, not a band.
+  scene.background = null;
   scene.fog = new THREE.Fog(new THREE.Color(PALETTE.fog), 30, 90);
 
   const hemi = new THREE.HemisphereLight(
     new THREE.Color(PALETTE.sky),
-    new THREE.Color('#5a4030'),
-    0.7,
+    new THREE.Color('#6b4a38'),
+    0.85,
   );
   scene.add(hemi);
 
@@ -294,17 +587,51 @@ export function createWorld(scene) {
   sunLight.shadow.bias = -0.0006;
   scene.add(sunLight, sunLight.target);
 
-  // Sodium lamps over mid and both sites; no shadows, pools of warm light.
-  for (const [lx, lz] of [[0, 0], [-22, -14], [22, -14]]) {
+  // Cool fill from the east so the shadow side is never dead black. No shadow.
+  const fill = new THREE.DirectionalLight(new THREE.Color('#7a86c8'), 0.65);
+  fill.position.set(40, 18, -6);
+  fill.target.position.set(0, 0, 0);
+  scene.add(fill, fill.target);
+
+  // Sodium lamps: mid (0, 4.5), site A (-18.2, -17), site B (18.2, -17).
+  // The site posts stand clear of the north containers and the site pads.
+  // Head sits EXACTLY above its post (no offset). Cone glow + halo sprite
+  // under each head; the PointLight follows the head.
+  const coneMat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(PALETTE.sodium), transparent: true, opacity: 0.05,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  });
+  for (const [lx, lz] of [[0, 4.5], [-18.2, -17], [18.2, -17]]) {
     const lamp = new THREE.PointLight(new THREE.Color(PALETTE.sodium), 60, 26, 2);
-    lamp.position.set(lx, 5.2, lz);
+    lamp.position.set(lx, 5.15, lz);
     scene.add(lamp);
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.14, 5.4, 0.14), materials.steel);
+    post.position.set(lx, 2.7, lz);
+    group.add(post);
     const head = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 0.5), materials.steel);
     head.position.set(lx, 5.4, lz);
     group.add(head);
-    const post = new THREE.Mesh(new THREE.BoxGeometry(0.14, 5.4, 0.14), materials.steel);
-    post.position.set(lx + 0.8, 2.7, lz);
-    group.add(post);
+    const bulb = new THREE.Mesh(
+      new THREE.BoxGeometry(0.4, 0.05, 0.4),
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color(PALETTE.sodium),
+        emissive: new THREE.Color(PALETTE.sodium),
+        emissiveIntensity: 3, roughness: 0.4,
+      }),
+    );
+    bulb.position.set(lx, 5.29, lz);
+    group.add(bulb);
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(0.8, 2.0, 24, 1, true), coneMat);
+    cone.position.set(lx, 4.3, lz);
+    group.add(cone);
+    const haloSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex, color: new THREE.Color(PALETTE.sodium),
+      transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }));
+    haloSprite.position.set(lx, 5.35, lz);
+    haloSprite.scale.set(2.4, 2.4, 1);
+    group.add(haloSprite);
   }
 
   const waypoints = buildWaypoints();
@@ -315,6 +642,8 @@ export function createWorld(scene) {
     const pulse = 1.4 + 1.4 * Math.sin(t * 5);
     beaconMats[0].emissiveIntensity = pulse;
     beaconMats[1].emissiveIntensity = 1.4 + 1.4 * Math.sin(t * 5 + Math.PI);
+    beaconGlows[0].material.opacity = 0.25 + 0.35 * Math.sin(t * 5) + 0.35;
+    beaconGlows[1].material.opacity = 0.25 + 0.35 * Math.sin(t * 5 + Math.PI) + 0.35;
     craneLightMat.emissiveIntensity = Math.sin(t * 1.5) > 0 ? 2.5 : 0.15;
   }
 

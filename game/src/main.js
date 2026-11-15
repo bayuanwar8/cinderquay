@@ -2,6 +2,18 @@
 // at the display's rate; the simulation never reads the frame clock.
 // ?shot=start|combat|plant|end with &seed=N arranges a deterministic frame,
 // renders it twice, then freezes and sets window.__shotReady.
+//
+// Where the systems live (this file only wires them together):
+//   rounds / buy / plant timers / win checks -> rounds.js (createRounds)
+//   bot AI: brain, pathfinding, shooting, plant/defuse tasks -> bots.js (createBots)
+//   weapons: WEAPONS/GRENADES tables, viewmodel rig, hitscan, grenades -> weapons.js
+//   map, lighting, sites, spawns, waypoints, colliders -> world.js (createWorld)
+//   HUD: health/ammo/timer/score/minimap/kill feed/overlays/buy menu -> hud.js (createHud)
+//   audio: synth WebAudio shots/hits/kills/UI -> audio.js (createAudio)
+//   player movement + collision -> player.js; input + pointer lock -> input.js
+//   round state + damage -> state.js; deterministic RNG -> rng.js
+//   tracers/impacts/explosions/smoke -> effects.js; staged screenshots -> shots.js
+// No network, no multiplayer, no dependencies beyond three.js.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { mulberry32 } from './rng.js';
@@ -87,18 +99,30 @@ let lastAlive = true;
 let slot = 'primary'; // primary | pistol | he | smoke
 
 // Planted/dropped bomb device (live play only; shot mode stages its own).
+// Cylinder body + cap + antenna + blinking lamp; names and visibility logic
+// are part of the contract — do not rename bombMesh/bombBody/bombLamp.
 const bombMesh = new THREE.Group();
 const bombBody = new THREE.Mesh(
-  new THREE.BoxGeometry(0.5, 0.3, 0.35),
-  new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.6 }),
+  new THREE.CylinderGeometry(0.24, 0.26, 0.3, 20),
+  new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.55, metalness: 0.35 }),
 );
 bombBody.position.y = 0.15;
+const bombCap = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.13, 0.16, 0.08, 16),
+  new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.5, metalness: 0.5 }),
+);
+bombCap.position.y = 0.34;
+const bombAntenna = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.015, 0.015, 0.3, 6),
+  new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.4, metalness: 0.8 }),
+);
+bombAntenna.position.set(0.18, 0.42, 0);
 const bombLamp = new THREE.Mesh(
   new THREE.SphereGeometry(0.07, 8, 8),
   new THREE.MeshStandardMaterial({ color: 0xff3b30, emissive: 0xff3b30, emissiveIntensity: 2 }),
 );
-bombLamp.position.y = 0.35;
-bombMesh.add(bombBody, bombLamp);
+bombLamp.position.y = 0.4;
+bombMesh.add(bombBody, bombCap, bombAntenna, bombLamp);
 bombMesh.visible = false;
 scene.add(bombMesh);
 

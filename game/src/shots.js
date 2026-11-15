@@ -124,6 +124,9 @@ export function setupShot(name, ctx) {
     state.bomb = { status: 'idle', site: null, carrierId: -1, planterId: -1, defuserId: -1, progress: 0, timer: 35, pos: null };
     resetAgents();
     placePlayer(0, 20, 0);
+    // v2 mid lamp post (0,4.5) sits on the lane axis from here, but it is
+    // only 0.14 m wide at 15.5 m — a thin centred line, not a blocker —
+    // so the v1 start composition is kept as-is.
     setCamera(0, EYE, 20, 0, 1.4, -14);
     settle(10);
     baseHud(100, 0, 12, 36, 'P9 Sidearm', 100, 0, 0, 1, 800);
@@ -177,7 +180,21 @@ export function setupShot(name, ctx) {
     }
     if (ctx.rig && ctx.rig.state) {
       ctx.rig.state.flash = 1;
-      ctx.rig.state.kick = 0.06;
+      ctx.rig.state.kick = 0.02;
+    }
+    // Aftermath of the firefight, added AFTER settle so everything is at
+    // full brightness in the capture: a just-detonated HE near the mid door
+    // (the feed already shows two eliminations), residual smoke by the door,
+    // and a 3-spark hit burst on the Tide bot (one impact was added above).
+    if (ctx.effects) {
+      try {
+        if (tideMid && tideMid.pos) {
+          ctx.effects.addImpact(new THREE.Vector3(tideMid.pos.x - 0.15, 1.35, tideMid.pos.z + 0.1), '#ffd27a');
+          ctx.effects.addImpact(new THREE.Vector3(tideMid.pos.x + 0.15, 1.05, tideMid.pos.z - 0.1), '#ffb347');
+        }
+        if (typeof ctx.effects.addExplosion === 'function') ctx.effects.addExplosion(new THREE.Vector3(-4, 1, -7));
+        if (typeof ctx.effects.addSmoke === 'function') ctx.effects.addSmoke(new THREE.Vector3(-1.5, 1, -8.5), 2.5, 30);
+      } catch (e) { /* no-op */ }
     }
     if (hud) {
       hud.hideOverlay();
@@ -217,32 +234,60 @@ export function setupShot(name, ctx) {
     placePlayer(-18, -10, yawToward(-18, -10, -22, -14));
     const tideHold = byTeam('tide', 0);
     // Hold bot just south of the site's north container, inside the frame;
-    // defuser on the west side of the device (the sodium lamp post at
-    // (-21.2,-14) hides anything standing east of it from this camera).
+    // defuser on the west side of the device. Lamp post A v2 is at
+    // (-18.2,-18.2): south of the site and beyond the device from this
+    // camera, so it cannot cover the defuser or the device (it only shows
+    // as a thin post near the right frame edge).
     place(tideHold, -20, -17, yawToward(-20, -17, -22, -14));
     place(emberDefuser, -23, -13, yawToward(-23, -13, -22, -14));
     syncRigAmmo('rifle', 18, 60);
     if (ctx.applySlot) ctx.applySlot();
-    // Planted device: dark box + blinking orange lamp, on the site A floor.
+    // Planted device: cylinder body + cap + blinking lamp, on the site A floor.
     if (world.group) {
       const device = new THREE.Group();
       const body = new THREE.Mesh(
-        new THREE.BoxGeometry(0.5, 0.3, 0.35),
-        new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.6 }),
+        new THREE.CylinderGeometry(0.24, 0.26, 0.3, 20),
+        new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.55, metalness: 0.35 }),
       );
       body.position.y = 0.15;
+      const cap = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.13, 0.16, 0.08, 16),
+        new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.5, metalness: 0.5 }),
+      );
+      cap.position.y = 0.34;
       const lamp = new THREE.Mesh(
         new THREE.SphereGeometry(0.07, 8, 8),
         new THREE.MeshStandardMaterial({ color: 0xff3b30, emissive: 0xff3b30, emissiveIntensity: 2 }),
       );
-      lamp.position.y = 0.35;
-      device.add(body);
-      device.add(lamp);
+      lamp.position.y = 0.4;
+      device.add(body, cap, lamp);
       device.position.set(-22, 0, -14);
       world.group.add(device);
     }
     setCamera(-18, EYE, -10, -22, 1.0, -14);
     settle(30);
+    // Covering fire + cover smoke, added AFTER settle so they are still
+    // bright in the capture: the player fires one round at the Tide hold
+    // bot (ammo 18/60 already accounts for it) and a smoke cloud from the
+    // earlier push hangs west of the site — clear of the defuser and the
+    // device. No explosion here: the bomb is planted and being defused,
+    // it has not gone off.
+    if (ctx.effects) {
+      try {
+        const fwd = forwardOf(yawToward(-18, -10, -22, -14));
+        const from = new THREE.Vector3(-18 + fwd.x * 1.2 + 0.3, 1.45, -10 + fwd.z * 1.2);
+        const to = tideHold && tideHold.pos
+          ? new THREE.Vector3(tideHold.pos.x, 1.2, tideHold.pos.z)
+          : new THREE.Vector3(-20, 1.2, -17);
+        if (typeof ctx.effects.addTracer === 'function') ctx.effects.addTracer(from, to, '#ffb347');
+        if (typeof ctx.effects.addImpact === 'function') ctx.effects.addImpact(to, '#ffb347');
+        if (typeof ctx.effects.addSmoke === 'function') ctx.effects.addSmoke(new THREE.Vector3(-26.5, 1, -17.5), 1.2, 30);
+      } catch (e) { /* no-op */ }
+    }
+    if (ctx.rig && ctx.rig.state) {
+      ctx.rig.state.flash = 1;
+      ctx.rig.state.kick = 0.02;
+    }
     if (hud) {
       hud.hideOverlay();
       baseHud(100, 0, 18, 60, 'KR-47 Emberline', 24, 2, 1, 4, 2400);
@@ -265,9 +310,24 @@ export function setupShot(name, ctx) {
     const tideDown1 = byTeam('tide', 0);
     const tideDown2 = byTeam('tide', 1);
     const emberStand = byTeam('ember', 0);
-    drop(tideDown1, -22, -14, 0.6);
-    drop(tideDown2, -20, -12, -0.4);
-    place(emberStand, -19, -11, yawToward(-19, -11, -22, -14));
+    // Fallen bots spread LEFT and RIGHT of centre so they stay visible
+    // beside/below the centred roundEnd panel instead of hiding behind it,
+    // and parked inside the light: tideDown1 ~2.5 m from the staged
+    // explosion at the site, tideDown2 ~2.7 m from the v2 lamp A pool
+    // (-18.2,-18.2), so both catch strong light from above/beside instead
+    // of lying dark on dark ground. Camera moved closer than v1 (player at
+    // (-16.5,-9) instead of (-14,-6)) and pitched UP (+0.18) so the ground
+    // — and the bodies on it — drops into the strip below the panel, while
+    // the standing Ember guard is pushed far right (x ~1000) so the panel
+    // never covers it. The fallen bots' yaws put their bodies ACROSS the
+    // frame (not foreshortened toward the camera) so they read as bodies,
+    // not dark blobs: tideDown1 head-left, tideDown2 head-right.
+    // NOTE: setCamera below is only nominal — settle() re-syncs the camera
+    // from the player position/yaw/pitch, so the player placement IS the
+    // camera placement here.
+    drop(tideDown1, -19.5, -11.5, 2.3);
+    drop(tideDown2, -22, -12.5, -0.84);
+    place(emberStand, -17.5, -13.5, yawToward(-17.5, -13.5, -22, -14));
     if (player) {
       player.weaponId = 'rifle';
       player.mag = 22;
@@ -276,11 +336,18 @@ export function setupShot(name, ctx) {
       player.hp = 100;
       player.grenades = { he: 1, smoke: 0 };
     }
-    placePlayer(-14, -6, yawToward(-14, -6, -22, -14));
+    placePlayer(-16.5, -9, yawToward(-16.5, -9, -21, -14));
+    if (player) player.pitch = 0.18;
     syncRigAmmo('rifle', 22, 60);
     if (ctx.applySlot) ctx.applySlot();
-    setCamera(-14, 3.2, -6, -22, 0.8, -14);
+    setCamera(-16.5, EYE, -9, -21, 0.7, -14);
     settle(30); // 0.5 s: fallen bots finish their 0.4 s fall-over animation
+    // Fresh explosion glow at the site, added AFTER settle so it is still
+    // at full brightness in the capture: its light spills onto the fallen
+    // bots and the ground around the panel.
+    if (ctx.effects && typeof ctx.effects.addExplosion === 'function') {
+      try { ctx.effects.addExplosion(new THREE.Vector3(-22, 1, -14)); } catch (e) { /* no-op */ }
+    }
     if (hud) {
       hud.setHealth(100, 0);
       hud.setAmmo(22, 60, 'KR-47 Emberline');

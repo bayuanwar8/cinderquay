@@ -4,8 +4,8 @@
 export const PALETTE = {
   sky: '#1b2340',       // deep indigo dusk sky
   horizon: '#ff7a2f',   // low orange sun band
-  fog: '#3a2b3d',       // dusk haze
-  ground: '#33302e',    // asphalt yard
+  fog: '#57303a',     // dusk haze — matches the sky dome horizon band
+  ground: '#4a4640',    // asphalt yard (texture base; was flat #33302e)
   concrete: '#6b6560',
   steel: '#4a5560',
   rust: '#b4552d',
