@@ -14,6 +14,19 @@ import { dist2d } from './nav.js';
 
 const SITE_HOLD_DIST = 9; // attackers stay within this of a planted site
 const DEFUSE_REACH = 2; // defenders channel once this close to the device
+// BUG 8: a defender duelling an enemy farther than this from the device
+// rotates to the bomb instead — 12 m is the same "far enemy" notion as
+// the carrier rule in bots.js, and about SITE_HOLD_DIST (9) + the site
+// radius (3.4): beyond it the enemy cannot be holding the site.
+const ROTATE_FAR_DIST = 12;
+// BUG 8: a defender whose rotate route is spent walks the last metres
+// straight to the device when it is within this distance — the planter
+// stops at the edge of the 3.4 m site radius and the plant-spot waypoint
+// sits at the site centre, so the route can end up to 3.3 + 0.6
+// (waypoint-arrival slack) = 3.9 m from the device (checked numerically
+// over the site disc); 5 m covers that with ~1 m of margin. Exported:
+// bots.js uses the same bound for the direct walk.
+export const DEFUSE_WALK_DIST = 5;
 
 // Split the bots into attackers/defenders for the round and give each a
 // lane and a site. Returns { attackers, defenders, calledSite }.
@@ -97,14 +110,38 @@ export function postPlant(agent, bomb, world, nav, isAttacker, radio) {
       ai.holdWp = nav.nearestWaypoint(agent.pos.x, agent.pos.z);
     }
   } else {
-    if (ai.state === 'engage' || ai.state === 'dead' || ai.state === 'defuse') return;
+    if (ai.state === 'dead' || ai.state === 'defuse') return;
     const d = bomb.pos ? dist2d(agent.pos.x, agent.pos.z, bomb.pos.x, bomb.pos.z) : Infinity;
+    // BUG 8: standing on the device defuses even mid-duel. The old code
+    // returned early for 'engage' before ever checking the distance, so
+    // a defender strafing across the bomb never channelled.
     if (d <= DEFUSE_REACH) {
       ai.state = 'defuse';
-    } else if (ai.state !== 'retreat') {
+      return;
+    }
+    // BUG 8: a defender duelling a far-away enemy never rotates — the
+    // attackers hold the site in the open, so the defender almost always
+    // has line of sight and stays 'engage' for the whole 35 s fuse. Let
+    // an 'engage' defender rotate when its target is far from the
+    // device: that enemy is not guarding the site, so the duel can wait.
+    // A defender whose target is close to the bomb keeps duelling — it
+    // is already defending the site.
+    const farTarget = ai.state === 'engage' && ai.target && bomb.pos &&
+      dist2d(ai.target.pos.x, ai.target.pos.z, bomb.pos.x, bomb.pos.z) > ROTATE_FAR_DIST;
+    if (ai.state === 'engage' && !farTarget) return;
+    if (ai.state !== 'retreat') {
       ai.state = 'retreat';
       const wp = nav.nearestWaypoint(bomb.pos.x, bomb.pos.z);
-      nav.planTo(agent, wp);
+      // BUG 8: only re-plan when the route does not already end at the
+      // bomb — the engage transition re-enters 'engage' every frame while
+      // the defender still sees its target, so re-planning here on every
+      // frame would reset pathIdx and pin the defender to the first
+      // waypoint of its route. A spent route close to the device is not
+      // re-planned either: bots.js walks the last metres straight to the
+      // bomb instead (a re-plan would send it back to the waypoint).
+      const pathLeft = ai.path ? ai.path.length - ai.pathIdx : 0;
+      const dest = ai.path && ai.path.length ? ai.path[ai.path.length - 1] : -1;
+      if (dest !== wp || (pathLeft <= 0 && d > DEFUSE_WALK_DIST)) nav.planTo(agent, wp);
       // One rotation call per plant, not one per frame (B).
       if (radio && !ai.radioRotated) {
         ai.radioRotated = true;

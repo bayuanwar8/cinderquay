@@ -13,7 +13,7 @@ import { throwGrenade } from './grenades.js';
 import { damageAgent } from './state.js';
 import { dist2d, yawTo, segmentHitsSphere, createNavigator } from './nav.js';
 import { createHearing } from './hearing.js';
-import { assignTasks, clearPlantState, updateCarrier, postPlant } from './tactics.js';
+import { assignTasks, clearPlantState, updateCarrier, postPlant, DEFUSE_WALK_DIST } from './tactics.js';
 import { buildBot, syncMesh } from './botmodels.js';
 const EMBER_NAMES = ['Ash', 'Coal', 'Rust', 'Soot'];
 const TIDE_NAMES = ['Brine', 'Kelp', 'Fathom', 'Salter', 'Marrow'];
@@ -449,7 +449,16 @@ export function createBots(scene, world, state) {
     // BUG 4: the bomb carrier never investigates — chasing a sound
     // replaces its site route and it never walks back.
     const isCarrier = isAttacker && bomb.carrierId === agent.id && bomb.status === 'carried';
-    if (!isCarrier) hearing.investigate(agent, nav.planTo, nav.nearestWaypoint, ctx.radio);
+    // BUG 8: the same hijack, defender side — a defender retreating to
+    // a planted bomb must not investigate either. The attackers on the
+    // site keep shooting, so the heard-shot waypoint changes every
+    // ~0.5 s and each investigate resets the retreat route to its first
+    // waypoint: the defender yo-yos in mid and never reaches the device
+    // during the 35 s fuse. Only the bomb-bound retreat is exempt;
+    // every other defender still investigates exactly as before.
+    const retreatingToBomb = !isAttacker && ai.state === 'retreat' &&
+      (bomb.status === 'planted' || bomb.status === 'defusing');
+    if (!isCarrier && !retreatingToBomb) hearing.investigate(agent, nav.planTo, nav.nearestWaypoint, ctx.radio);
     // Once the bomb is planted, the planter stops channeling and holds the
     // site like any other attacker (tactics.js).
     clearPlantState(agent, bomb, nav);
@@ -480,9 +489,27 @@ export function createBots(scene, world, state) {
     // --- behaviour per state ---
     if (ai.state === 'push' || ai.state === 'retreat') {
       if (!followPath(agent, dt, BOT_SPEED)) {
-        ai.state = 'hold';
-        ai.holdWp = nav.nearestWaypoint(agent.pos.x, agent.pos.z);
-        ai.scanYaw = agent.yaw;
+        // BUG 8: a defender's rotate route ends at the nearest waypoint
+        // to the device, which can sit up to ~3.9 m away — the planter
+        // stops at the edge of the 3.4 m site radius and followPath stops
+        // 0.6 m short of the waypoint — outside DEFUSE_REACH (2 m).
+        // Re-planning to the same waypoint would loop forever, so when
+        // the planted bomb is a few metres away the defender walks
+        // straight at it across the open site instead of holding.
+        if (!isAttacker && (bomb.status === 'planted' || bomb.status === 'defusing') && bomb.pos &&
+            dist2d(agent.pos.x, agent.pos.z, bomb.pos.x, bomb.pos.z) <= DEFUSE_WALK_DIST) {
+          const dx = bomb.pos.x - agent.pos.x;
+          const dz = bomb.pos.z - agent.pos.z;
+          const l = Math.hypot(dx, dz) || 1;
+          agent.yaw = yawTo(agent.pos, bomb.pos);
+          agent.mover.yaw = agent.yaw;
+          agent.mover.step(dt, dx / l, dz / l, BOT_SPEED, false, false);
+          ai.walkPhase += dt * 9;
+        } else {
+          ai.state = 'hold';
+          ai.holdWp = nav.nearestWaypoint(agent.pos.x, agent.pos.z);
+          ai.scanYaw = agent.yaw;
+        }
       }
     } else if (ai.state === 'hold') {
       // Slow scan: sweep the yaw back and forth around the hold direction.
