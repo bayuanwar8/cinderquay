@@ -79,59 +79,88 @@
     background: #fff; opacity: 0; pointer-events: none;
   }
 
-  /* Team plan + player role, under the top bar. */
-  #plan {
-    position: fixed; top: 58px; left: 50%; transform: translateX(-50%);
+  /* Top bar: ONE dark pill — team + score + alive pips left/right,
+     round + timer + phase centre, plan as a second row inside the
+     same pill (never a free-floating caption). Centred, ~470px wide
+     at 1280px, so it clears the top-left minimap (ends x=204) and the
+     right-side killfeed/radio (top 190px). */
+  #topbar {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: stretch;
+    font-family: var(--font-readout);
+    text-shadow: 0 1px 3px rgba(0,0,0,.8);
+    background: rgba(20,16,28,.72);
+    border: 1px solid var(--hairline); border-radius: var(--radius-panel);
+    padding: 5px 16px 6px;
+  }
+  #topbar .tb-row { display: flex; align-items: center; gap: 18px; }
+  #topbar .tb-team { display: flex; align-items: center; gap: 8px; }
+  #topbar .tb-name { font-size: 13px; font-weight: 700; letter-spacing: .12em; }
+  .tb-ember .tb-name { color: var(--ember); }
+  .tb-tide .tb-name { color: var(--tide); }
+  #topbar .team-score { font-size: 26px; font-weight: 700; line-height: 1; }
+  #score-ember { color: var(--ember); }
+  #score-tide { color: var(--tide); }
+  .tb-pips { display: inline-flex; gap: 3px; }
+  .tb-pips i { width: 7px; height: 7px; border-radius: 50%; }
+  .tb-ember .tb-pips i { background: var(--ember); }
+  .tb-tide .tb-pips i { background: var(--tide); }
+  .tb-pips i.dead { opacity: .18; }
+  #topbar .tb-mid {
+    display: flex; flex-direction: column; align-items: center;
+    line-height: 1.15; min-width: 76px;
+  }
+  #timer {
+    font-size: 26px; font-weight: 700; text-align: center;
+  }
+  #timer.low, #timer.urgent { color: var(--danger); }
+  #round-num { font-size: 10px; color: var(--muted); letter-spacing: .14em; }
+  #phase-label {
     display: none;
-    font-family: var(--font-readout); font-size: 13px; font-weight: 700;
+    font-size: 10px; font-weight: 700; color: var(--accent); letter-spacing: .18em;
+  }
+  #phase-label.on { display: block; }
+
+  /* Team plan + player role, second row inside the topbar pill. */
+  #plan {
+    display: none;
+    margin-top: 4px; padding-top: 4px;
+    border-top: 1px solid var(--hairline);
+    text-align: center;
+    font-size: 11px; font-weight: 700;
     letter-spacing: .1em; color: var(--accent);
-    text-shadow: 0 1px 3px rgba(0,0,0,.9);
-    background: rgba(20,16,28,.55); padding: 3px 10px; border-radius: 4px;
-    border: 1px solid var(--hairline);
   }
   #plan.on { display: block; }
 
-  /* Top bar: round, timer, score. */
-  #topbar {
-    position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
-    display: flex; align-items: center; gap: 14px;
-    font-family: var(--font-readout);
-    text-shadow: 0 1px 3px rgba(0,0,0,.8);
-  }
-  #topbar .team-score { font-size: 26px; font-weight: 700; }
-  #score-ember { color: var(--ember); }
-  #score-tide { color: var(--tide); }
-  #timer {
-    font-size: 26px; font-weight: 700; min-width: 76px; text-align: center;
-    padding: 2px 10px; background: rgba(20,16,28,.55);
-    border: 1px solid var(--hairline); border-radius: var(--radius-panel);
-  }
-  #timer.low, #timer.urgent { color: var(--danger); border-color: var(--danger); }
-  #round-num { font-size: 13px; color: var(--muted); letter-spacing: .08em; }
-
-  #money-box {
-    position: fixed; top: 18px; left: 24px;
-    font-family: var(--font-readout); font-size: 15px;
-    text-shadow: 0 1px 3px rgba(0,0,0,.8);
-  }
-  #money-box .label { color: var(--muted); font-size: 11px; letter-spacing: .12em; }
-  #money { color: var(--accent); font-size: 20px; font-weight: 700; }
+  /* Bomb status now lives as a row inside the bottom-left vitals panel
+     (BUG 7): hidden until setBombStatus gives it text. Top-left holds
+     only the minimap. */
   #bomb-status {
-    margin-top: 4px; font-size: 13px; font-weight: 700; letter-spacing: .06em;
+    display: none;
+    margin-top: 8px; padding-top: 8px;
+    border-top: 1px solid var(--hairline);
+    font-size: 12px; font-weight: 700; letter-spacing: .06em;
     color: var(--ink);
   }
+  #bomb-status.on { display: block; }
   #bomb-status.planted, #bomb-status.on { color: var(--danger); }
   #bomb-status.carried { color: var(--accent); }
 
+  /* Minimap: top-left — the top-left now holds only the minimap
+     (credits moved into the bottom-left vitals panel). Top 96px clears
+     the centred topbar; the label sits 4px under the 140px map. The
+     right side stays clear for the killfeed + radio feed. Vitals live
+     at the bottom-left, the buy menu and scoreboard are centred, so
+     nothing overlaps here. */
   #minimap {
-    position: fixed; top: 18px; right: 24px;
+    position: fixed; top: 96px; left: 24px;
     width: 180px; height: 140px;
     background: rgba(20,16,28,.6);
     border: 1px solid var(--hairline); border-radius: var(--radius-panel);
   }
 
   #minimap-label {
-    position: fixed; top: 162px; right: 24px;
+    position: fixed; top: 240px; left: 24px;
     width: 180px; text-align: center;
     font-size: 8px; font-weight: 700; letter-spacing: .02em;
     color: var(--muted); text-shadow: 0 1px 2px rgba(0,0,0,.9);
@@ -149,46 +178,83 @@
   #killfeed .tide { color: var(--tide); }
   #killfeed .info { color: var(--muted); }
 
-  /* Bottom left: health + armor. */
-  #vitals { position: fixed; left: 24px; bottom: 24px; width: 240px; }
-  #health-bar {
-    height: 10px; background: rgba(20,16,28,.6);
-    border: 1px solid var(--hairline); border-radius: 5px; overflow: hidden;
+  /* Bottom left: ONE dark panel (BUG 7) — HEALTH / ARMOR / CREDITS as
+     three segments, small caps label above a big number, coloured bar
+     with a dark track under the health + armor numbers. Same
+     background, border, radius and padding as the top bar. */
+  #vitals {
+    position: fixed; left: 24px; bottom: 24px;
+    font-family: var(--font-readout);
+    text-shadow: 0 1px 3px rgba(0,0,0,.8);
+    background: rgba(20,16,28,.72);
+    border: 1px solid var(--hairline); border-radius: var(--radius-panel);
+    padding: 10px 16px 12px;
+  }
+  #vitals .vit-row { display: flex; gap: 20px; }
+  #vitals .vit-seg { min-width: 76px; }
+  #vitals .vit-seg + .vit-seg {
+    padding-left: 20px; border-left: 1px solid var(--hairline);
+  }
+  #vitals .vit-label {
+    font-size: 10px; font-weight: 700; color: var(--muted);
+    letter-spacing: .14em; white-space: nowrap;
+  }
+  #vitals .vit-num { font-size: 26px; line-height: 1.15; font-weight: 700; }
+  #health-num.low { color: var(--danger); }
+  #vitals .vit-bar {
+    height: 6px; margin-top: 4px;
+    background: rgba(0,0,0,.45);
+    border: 1px solid var(--hairline); border-radius: 3px; overflow: hidden;
   }
   #health-fill {
     height: 100%; width: 100%;
-    background: linear-gradient(90deg, var(--ember), var(--accent));
+    background: #58c96b;
     transition: width 120ms linear;
   }
   #health-fill.low { background: var(--danger); }
-  #vitals .nums {
-    display: flex; gap: 16px; margin-top: 6px;
-    font-family: var(--font-readout); font-size: 22px; font-weight: 700;
-    text-shadow: 0 1px 3px rgba(0,0,0,.8);
+  #armor-fill {
+    height: 100%; width: 0;
+    background: #5aa9ff;
+    transition: width 120ms linear;
   }
-  #vitals .nums small { font-size: 11px; color: var(--muted); font-weight: 400; letter-spacing: .1em; }
-  #health-num.low { color: var(--danger); }
+  #money { color: var(--accent); }
 
-  /* Bottom right: weapon + ammo. */
-  #loadout { position: fixed; right: 32px; bottom: 24px; text-align: right; }
-  #weapon-name { font-size: 13px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }
+  /* Bottom right: ONE dark panel (BUG 7) — weapon label, big ammo,
+     grenade counts, numbered slot pills with the active one
+     highlighted. Same background, border, radius and padding as the
+     top bar and the vitals panel. */
+  #loadout {
+    position: fixed; right: 32px; bottom: 24px; text-align: right;
+    font-family: var(--font-readout);
+    text-shadow: 0 1px 3px rgba(0,0,0,.8);
+    background: rgba(20,16,28,.72);
+    border: 1px solid var(--hairline); border-radius: var(--radius-panel);
+    padding: 10px 16px 12px;
+  }
+  #weapon-name {
+    font-size: 11px; font-weight: 700; letter-spacing: .14em;
+    color: var(--muted); text-transform: uppercase;
+  }
   #ammo {
     display: flex; align-items: baseline; gap: 8px; justify-content: flex-end;
-    font-family: var(--font-readout); font-size: 54px; line-height: 1; font-weight: 700;
-    text-shadow: 0 2px 4px rgba(0,0,0,.8);
+    font-size: 46px; line-height: 1.05; font-weight: 700;
   }
   #ammo.empty #ammo-mag { color: var(--danger); }
   #ammo-reserve { font-size: 16px; color: var(--muted); font-weight: 400; }
-  #grenade-count { font-size: 13px; color: var(--muted); font-family: var(--font-readout); margin-top: 4px; }
+  #grenade-count { font-size: 13px; color: var(--muted); margin-top: 2px; }
   #weapon-slots {
     display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px;
-    font-family: var(--font-readout); font-size: 12px;
+    font-size: 12px;
   }
   #weapon-slots > * {
-    padding: 3px 8px; background: rgba(20,16,28,.55);
+    padding: 3px 8px; background: rgba(0,0,0,.35);
     border: 1px solid var(--hairline); border-radius: 4px; color: var(--muted);
+    white-space: nowrap;
   }
-  #weapon-slots > *.on, #weapon-slots > *.active { color: var(--ink); border-color: var(--accent); }
+  #weapon-slots > *.on, #weapon-slots > *.active {
+    color: var(--ink); border-color: var(--accent);
+    background: rgba(255,179,71,.16);
+  }
 
   /* Centre banner. */
   #banner {
@@ -337,17 +403,24 @@
   <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
 
   <div id="topbar">
-    <span class="team-score" id="score-ember">0</span>
-    <span id="timer">1:40</span>
-    <span class="team-score" id="score-tide">0</span>
-    <span id="round-num">ROUND 1/9</span>
-  </div>
-  <div id="plan"></div>
-
-  <div id="money-box">
-    <div class="label">CREDITS</div>
-    <div id="money">$800</div>
-    <div id="bomb-status"></div>
+    <div class="tb-row">
+      <div class="tb-team tb-ember">
+        <span class="tb-name">EMBER</span>
+        <span class="team-score" id="score-ember">0</span>
+        <span class="tb-pips" id="pips-ember"></span>
+      </div>
+      <div class="tb-mid">
+        <span id="round-num">ROUND 1/9</span>
+        <span id="timer">1:40</span>
+        <span id="phase-label"></span>
+      </div>
+      <div class="tb-team tb-tide">
+        <span class="tb-pips" id="pips-tide"></span>
+        <span class="team-score" id="score-tide">0</span>
+        <span class="tb-name">TIDE</span>
+      </div>
+    </div>
+    <div id="plan"></div>
   </div>
 
   <canvas id="minimap" width="180" height="140"></canvas>
@@ -355,11 +428,23 @@
   <div id="killfeed"></div>
 
   <div id="vitals">
-    <div id="health-bar"><div id="health-fill"></div></div>
-    <div class="nums">
-      <span><span id="health-num">100</span> <small>HP</small></span>
-      <span><span id="armor-num">0</span> <small>ARMOR</small></span>
+    <div class="vit-row">
+      <div class="vit-seg">
+        <div class="vit-label">HEALTH</div>
+        <div class="vit-num"><span id="health-num">100</span></div>
+        <div class="vit-bar"><div id="health-fill"></div></div>
+      </div>
+      <div class="vit-seg">
+        <div class="vit-label" id="armor-label">ARMOR</div>
+        <div class="vit-num"><span id="armor-num">0</span></div>
+        <div class="vit-bar"><div id="armor-fill"></div></div>
+      </div>
+      <div class="vit-seg">
+        <div class="vit-label">CREDITS</div>
+        <div class="vit-num" id="money">$800</div>
+      </div>
     </div>
+    <div id="bomb-status"></div>
   </div>
 
   <div id="loadout">

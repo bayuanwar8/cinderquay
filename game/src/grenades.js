@@ -1,7 +1,8 @@
 // grenades.js — HE / smoke throws for CINDERQUAY.
 // Owns: throwing a grenade, its ballistic flight + bounce, the fuse,
 // and the detonation hooks (HE blast damage + explosion, smoke cloud).
-// No flash grenade here — that is a later workstream's job.
+// Flash grenade is handled here too (stepGrenades: HE blast, smoke cloud,
+// and flash blind on agents facing the burst).
 import * as THREE from 'three';
 import { GRENADES } from './weapons.js';
 import { damageAgent } from './state.js';

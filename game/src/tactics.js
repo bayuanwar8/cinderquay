@@ -51,13 +51,29 @@ export function clearPlantState(agent, bomb, nav) {
 
 // Carrier reaches the called site: channel (rounds/bomb owns progress).
 // Walking away from the site drops the bot back to 'push'.
-export function updateCarrier(agent, bomb, world) {
+// BUG 4: the carrier's route can be spent while it still stands outside
+// the site — after a fight, a divert, or a dropped-bomb pickup the path
+// is exhausted and the bot just holds forever. When the carrier has no
+// route left and is not mid-fight, walk it back to the plant spot (the
+// nearest waypoint to the site centre, which sits inside the plant
+// radius — the random site waypoints mostly do not).
+export function updateCarrier(agent, bomb, world, nav) {
   const ai = agent.ai;
   const site = world.sites[bomb.site || ai.site || 'A'];
-  if (site && dist2d(agent.pos.x, agent.pos.z, site.x, site.z) <= site.r) {
+  if (!site) return;
+  if (dist2d(agent.pos.x, agent.pos.z, site.x, site.z) <= site.r) {
     ai.state = 'plant';
-  } else if (ai.state === 'plant') {
-    ai.state = 'push';
+    return;
+  }
+  if (ai.state === 'plant') ai.state = 'push';
+  // Re-plan also while engaging: the carrier pushes through a fight on
+  // its route (bots.js), so a spent route must be replaced mid-fight too.
+  if (nav && ai.state !== 'defuse') {
+    const pathLeft = ai.path ? ai.path.length - ai.pathIdx : 0;
+    if (!ai.path || pathLeft <= 0) {
+      const wp = nav.nearestWaypoint(site.x, site.z);
+      if (nav.planTo(agent, wp)) ai.state = 'push';
+    }
   }
 }
 

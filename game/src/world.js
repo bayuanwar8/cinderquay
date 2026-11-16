@@ -49,17 +49,25 @@ const WAYPOINT_POS = [
   [20, -4],    // 19 B lane north
   [-12, 5],    // 20 south connector west
   [12, 5],     // 21 south connector east
-  [-12, -6],   // 22 north connector west
-  [12, -6],    // 23 north connector east
+  [-12, -4],   // 22 north connector west (BUG 4: was -6 — the 13->22 / 13->23
+  [12, -4],    // 23 north connector east  segments clipped the (±12,-8.5)
+  // containers' corners by 0.19 m < bot radius 0.34, wedging bots there)
 ];
 
 // Bidirectional edges; every pair below is walkable in a straight line
 // without clipping a solid box (checked against the cover layout).
+// BUG 4: [2,16], [3,19], [4,13], [7,13] are REMOVED — their segments cut
+// straight through the (±12,-8.5) containers (0.00 m clearance), and bots
+// walking them wedged against the container faces forever (the axis-
+// separated mover + inclusive box touch makes the corner a pocket: every
+// wish direction keeps the probe touching the box except away from the
+// waypoint, which the bot never wishes). Routes now go via the north
+// connectors (13->22->16 / 13->23->19), whose segments clear the boxes.
 const WAYPOINT_EDGES = [
   [0, 1], [0, 10], [0, 14], [1, 10], [1, 17],
-  [2, 13], [2, 16], [3, 13], [3, 19],
-  [4, 5], [4, 6], [4, 16], [4, 13], [4, 22], [6, 16],
-  [7, 8], [7, 9], [7, 19], [7, 13], [7, 23], [9, 19],
+  [2, 13], [3, 13],
+  [4, 5], [4, 6], [4, 16], [4, 22], [6, 16],
+  [7, 8], [7, 9], [7, 19], [7, 23], [9, 19],
   [10, 11], [10, 12], [10, 14], [10, 20], [10, 21],
   [11, 13], [11, 20], [11, 22],
   [12, 13], [12, 21], [12, 23],

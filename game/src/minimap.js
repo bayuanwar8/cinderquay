@@ -27,6 +27,43 @@ export function areaNameFor(x, z) {
 // perimeter walls span the whole yard, so they are skipped here and drawn
 // as the border instead. Everything left is a real obstacle: containers
 // (6 x 2.6), crates (1.2^2) and barrels (~0.84^2), classified by footprint.
+// Walkable route network, from the live waypoint graph (world.waypoints:
+// {id,x,z,neighbors[]}). Edges are verified walkable in world.js, so the
+// network drawn here is the real route map, not a guess. Falls back to the
+// painted ground markings (three N-S lanes + two E-W connectors + site
+// spurs) when no graph is passed in, so the panel never loses its roads.
+// Door nodes are the mid-block doors: WAYPOINT_POS 11 (-4.5, 0) and 12
+// (4.5, 0) in world.js — the two gaps the mid corridor splits through.
+const MID_DOORS = [[-4.5, 0], [4.5, 0]];
+
+function routeNetwork(waypoints) {
+  const edges = [];
+  const nodes = [];
+  if (Array.isArray(waypoints) && waypoints.length > 1) {
+    const byId = new Map(waypoints.map((w) => [w.id, w]));
+    for (const w of waypoints) {
+      if (!w || typeof w.x !== 'number' || !Array.isArray(w.neighbors)) continue;
+      nodes.push([w.x, w.z]);
+      for (const n of w.neighbors) {
+        const o = byId.get(n);
+        if (o && typeof o.x === 'number' && w.id < n) edges.push([[w.x, w.z], [o.x, o.z]]);
+      }
+    }
+    if (edges.length) return { edges, nodes };
+  }
+  // Fallback: the painted lane markings from the ground texture.
+  const lanes = [
+    [[-20, -12], [-20, 16]], [[0, -12], [0, 16]], [[20, -12], [20, 16]],
+    [[-15, 8], [15, 8]], [[-15, -6], [15, -6]],
+    [[-20, -8], [-22, -14]], [[20, -8], [22, -14]],
+    [[-6, 18], [6, 18]], [[-6, -18], [6, -18]],
+  ];
+  return {
+    edges: lanes,
+    nodes: [[-20, -8], [20, -8], [0, 14], [0, -10], [-6, 18], [6, 18], [-6, -18], [6, -18]],
+  };
+}
+
 function layoutRects(colliders) {
   const rects = [];
   for (const b of colliders || []) {
@@ -53,7 +90,7 @@ export function createMinimap(canvas, labelEl) {
   }
   let lastLabel = '';
 
-  function draw(agents, sites, bomb, playerYaw, visibleEnemies, colliders) {
+  function draw(agents, sites, bomb, playerYaw, visibleEnemies, colliders, waypoints) {
     if (!ctx) return;
     const scale = Math.min(LW / 64, LH / 48);
     const ox = (LW - 64 * scale) / 2;
@@ -62,10 +99,78 @@ export function createMinimap(canvas, labelEl) {
     const py = (z) => oy + (z - BOUNDS.minZ) * scale;
     const visible = visibleEnemies instanceof Set ? visibleEnemies : new Set();
 
-    // --- yard floor + faint 8 m grid -------------------------------------
+    // --- yard floor: asphalt, a touch lighter than before so the roads read
     ctx.clearRect(0, 0, LW, LH);
-    ctx.fillStyle = '#211c19';
+    ctx.fillStyle = '#292522';
     ctx.fillRect(0, 0, LW, LH);
+
+    // --- surfaces: concrete site pads + team spawn strips ------------------
+    // Site pads are concrete aprons (6.8 m, same as the painted pads in the
+    // ground texture); the rest of the yard is asphalt.
+    ctx.fillStyle = '#4a4438';
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.lineWidth = 1;
+    for (const cx of [-22, 22]) {
+      ctx.fillRect(px(cx - 3.4), py(-14 - 3.4), 6.8 * scale, 6.8 * scale);
+      ctx.strokeRect(px(cx - 3.4), py(-14 - 3.4), 6.8 * scale, 6.8 * scale);
+    }
+    // Spawn lines, same colours as the painted strips on the ground.
+    ctx.fillStyle = 'rgba(255,140,46,0.55)';
+    ctx.fillRect(px(-8.5), py(20 - 0.25), 17 * scale, Math.max(1.5, 0.5 * scale));
+    ctx.fillStyle = 'rgba(46,196,182,0.55)';
+    ctx.fillRect(px(-8.5), py(-20 - 0.25), 17 * scale, Math.max(1.5, 0.5 * scale));
+
+    // --- walkable roads: ribbon + dashed centre line + node dots -----------
+    // Ribbon first (wide, soft asphalt band), then the dashed yellow
+    // centre line — the same markings the ground texture paints — so each
+    // lane reads as a road, not just empty floor between blocks. Blocks
+    // are drawn after this, so a road visibly threads the gaps between
+    // containers instead of hiding under them.
+    const net = routeNetwork(waypoints);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (const [[ax, az], [bx, bz]] of net.edges) {
+      ctx.moveTo(px(ax), py(az));
+      ctx.lineTo(px(bx), py(bz));
+    }
+    ctx.strokeStyle = '#4a4238';
+    ctx.lineWidth = 2.6 * scale;
+    ctx.stroke();
+    ctx.beginPath();
+    for (const [[ax, az], [bx, bz]] of net.edges) {
+      ctx.moveTo(px(ax), py(az));
+      ctx.lineTo(px(bx), py(bz));
+    }
+    ctx.strokeStyle = 'rgba(201,154,46,0.75)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Waypoint nodes: faint dots, just enough to show the route joints.
+    ctx.fillStyle = 'rgba(255,255,255,0.28)';
+    for (const [nx, nz] of net.nodes) {
+      ctx.beginPath();
+      ctx.arc(px(nx), py(nz), 1.1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Mid-block doors: amber squares where the corridor splits through
+    // the mid block (west door -4.5,0 / east door 4.5,0).
+    ctx.strokeStyle = 'rgba(255,179,71,0.85)';
+    ctx.lineWidth = 1;
+    for (const [dx, dz] of MID_DOORS) {
+      ctx.strokeRect(px(dx) - 2.5, py(dz) - 2.5, 5, 5);
+    }
+    // Lane tags at the south end of each lane.
+    ctx.font = 'bold 6px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(154,147,138,0.95)';
+    ctx.fillText('A', px(-20), py(17.5));
+    ctx.fillText('MID', px(0), py(17.5));
+    ctx.fillText('B', px(20), py(17.5));
+
+    // --- faint 8 m grid ------------------------------------------------------
     ctx.strokeStyle = 'rgba(255,255,255,0.045)';
     ctx.lineWidth = 1;
     ctx.beginPath();

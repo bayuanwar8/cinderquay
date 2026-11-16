@@ -13,6 +13,8 @@ export function createHud() {
     healthNum: $('health-num'),
     healthFill: $('health-fill'),
     armorNum: $('armor-num'),
+    armorFill: $('armor-fill'),
+    armorLabel: $('armor-label'),
     ammoMag: $('ammo-mag'),
     ammoReserve: $('ammo-reserve'),
     weaponName: $('weapon-name'),
@@ -20,6 +22,9 @@ export function createHud() {
     timer: $('timer'),
     scoreEmber: $('score-ember'),
     scoreTide: $('score-tide'),
+    pipsEmber: $('pips-ember'),
+    pipsTide: $('pips-tide'),
+    phaseLabel: $('phase-label'),
     roundNum: $('round-num'),
     money: $('money'),
     killfeed: $('killfeed'),
@@ -54,6 +59,7 @@ export function createHud() {
   const last = {
     hp: -1, armor: -1, mag: -1, reserve: -1, weapon: '',
     he: -1, smoke: -1, flash: -1, timer: '', ember: -1, tide: -1, round: -1,
+    aliveE: -1, aliveT: -1, phase: '',
     money: -1, bomb: '', gap: -1, hint: '', channel: '', channelProg: -2,
     scoreboard: '', slots: '', plan: '', flashOp: -1,
   };
@@ -119,6 +125,12 @@ export function createHud() {
       if (el.healthFill) {
         el.healthFill.style.width = h + '%';
         el.healthFill.classList.toggle('low', h <= 25);
+      }
+      // Armor bar (0–100, kevlar) + label: 'ARMOR + KEVLAR' while any
+      // armor is worn, plain 'ARMOR' at 0.
+      if (el.armorFill) el.armorFill.style.width = Math.min(100, a) + '%';
+      if (el.armorLabel) {
+        el.armorLabel.textContent = a > 0 ? 'ARMOR + KEVLAR' : 'ARMOR';
       }
     },
 
@@ -186,6 +198,38 @@ export function createHud() {
       if (r === last.round) return;
       last.round = r;
       if (el.roundNum) el.roundNum.textContent = 'ROUND ' + r + '/9';
+    },
+
+    // Alive pips per team (5 dots each, dead ones dimmed). Rebuilt only
+    // when a count changes.
+    setAlive(emberAlive, tideAlive) {
+      const e = Math.max(0, Math.min(5, emberAlive | 0));
+      const t = Math.max(0, Math.min(5, tideAlive | 0));
+      if (e === last.aliveE && t === last.aliveT) return;
+      last.aliveE = e;
+      last.aliveT = t;
+      const paint = (node, alive) => {
+        if (!node) return;
+        let html = '';
+        for (let i = 0; i < 5; i += 1) {
+          html += '<i class="' + (i < alive ? 'on' : 'dead') + '"></i>';
+        }
+        node.innerHTML = html;
+      };
+      paint(el.pipsEmber, e);
+      paint(el.pipsTide, t);
+    },
+
+    // Small phase label under the timer: BUY PHASE / ATTACK / DEFEND,
+    // '' hides it (menu, round end, match end).
+    setPhase(label) {
+      const t = label || '';
+      if (t === last.phase) return;
+      last.phase = t;
+      if (el.phaseLabel) {
+        el.phaseLabel.textContent = t;
+        el.phaseLabel.classList.toggle('on', t.length > 0);
+      }
     },
 
     setMoney(m) {
@@ -309,10 +353,12 @@ export function createHud() {
     },
 
     // Same signature as before, plus an optional 6th arg: the world
-    // collider list (world.colliders) the minimap draws its layout from.
-    // The drawing itself lives in minimap.js.
-    drawMinimap(agents, sites, bomb, playerYaw, visibleEnemies, layout) {
-      minimap.draw(agents, sites, bomb, playerYaw, visibleEnemies, layout);
+    // collider list (world.colliders) the minimap draws its layout from,
+    // and an optional 7th arg: the waypoint graph (world.waypoints) the
+    // minimap draws its road network from. The drawing itself lives in
+    // minimap.js.
+    drawMinimap(agents, sites, bomb, playerYaw, visibleEnemies, layout, waypoints) {
+      minimap.draw(agents, sites, bomb, playerYaw, visibleEnemies, layout, waypoints);
     },
 
     hitMarker(kill) {

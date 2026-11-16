@@ -150,6 +150,20 @@ function currentPlan() {
   return `PLAN: HOLD ${site} — YOU: ANCHOR`;
 }
 
+// Topbar phase label: BUY PHASE in the buy window, ATTACK/DEFEND while
+// live (player is Ember), hidden otherwise.
+function phaseLabel() {
+  if (state.phase === 'buy') return 'BUY PHASE';
+  if (state.phase !== 'live') return '';
+  return state.attackSide === 'ember' ? 'ATTACK' : 'DEFEND';
+}
+
+function aliveCount(team) {
+  let n = 0;
+  for (const a of state.agents) if (a.team === team && a.alive) n += 1;
+  return n;
+}
+
 // Scoreboard meta: round-end banner naming the winner + MVP, and the
 // current W/L streak per team (W from state.streak, L from state.losses).
 function scoreboardMeta() {
@@ -358,6 +372,8 @@ function step(dt) {
   // Sync HUD from state (hud caches, so unchanged values skip DOM writes).
   hud.setHealth(me.hp, me.armor);
   hud.setPlan(currentPlan());
+  hud.setAlive(aliveCount('ember'), aliveCount('tide'));
+  hud.setPhase(phaseLabel());
   hud.setFlash(playerBlind());
   // Ammo comes from the rig so a finished reload shows up without a shot.
   if (slot === 'primary' || slot === 'pistol') {
@@ -437,7 +453,7 @@ function step(dt) {
       const hit = hitscan(origin, tmpDir, dist + 0.5, world.shootables, state.agents, me);
       if (hit && hit.agent === agent) visibleEnemies.add(agent.id);
     }
-    hud.drawMinimap(state.agents, world.sites, state.bomb, me.yaw, visibleEnemies, world.colliders);
+    hud.drawMinimap(state.agents, world.sites, state.bomb, me.yaw, visibleEnemies, world.colliders, world.waypoints);
   }
 
   // Damage vignette fades with health.
@@ -485,6 +501,8 @@ function runShot(name) {
   hud.setMoney(me.money);
   hud.setHealth(me.hp, me.armor);
   hud.setPlan(currentPlan());
+  hud.setAlive(aliveCount('ember'), aliveCount('tide'));
+  hud.setPhase(phaseLabel());
   zones.update(0, state);
   if (slot === 'he' || slot === 'smoke' || slot === 'flash') {
     hud.setAmmo(me.grenades[slot], 0, slot === 'he' ? GRENADES.he.name : slot === 'smoke' ? GRENADES.smoke.name : GRENADES.flash.name);
@@ -492,7 +510,7 @@ function runShot(name) {
     hud.setAmmo(rig.state.mag, rig.state.reserve, WEAPONS[rig.state.weaponId].name);
   }
   hud.setGrenades(me.grenades.he, me.grenades.smoke, me.grenades.flash);
-  hud.drawMinimap(state.agents, world.sites, state.bomb, me.yaw, visibleEnemies, world.colliders);
+  hud.drawMinimap(state.agents, world.sites, state.bomb, me.yaw, visibleEnemies, world.colliders, world.waypoints);
   paintTwiceThenReady();
 }
 

@@ -309,6 +309,14 @@ export function createBots(scene, world, state) {
     state.bomb.timer = 35;
     if (state.bomb.pos) state.bomb.pos.set(carrier.pos.x, 0.4, carrier.pos.z);
     else state.bomb.pos = new THREE.Vector3(carrier.pos.x, 0.4, carrier.pos.z);
+    // BUG 4: the carrier's route must end ON the plant spot. planToSite
+    // picks a random waypoint within 7 m of the site, but only the plant
+    // spot is inside the 3.4 m plant radius — the other two leave the
+    // carrier holding outside the site forever.
+    if (carrier) {
+      const site = world.sites[calledSite];
+      if (site) nav.planTo(carrier, nav.nearestWaypoint(site.x, site.z));
+    }
   }
 
   // --- death ----------------------------------------------------------------------
@@ -371,6 +379,10 @@ export function createBots(scene, world, state) {
         bomb.carrierId = agent.id;
         bomb.site = ai.site || bomb.site;
         addFeedLine(`${agent.name} picked up the bomb`, agent.team);
+        // BUG 4: a fresh carrier walks straight to the plant spot
+        // instead of finishing the old route to the drop point.
+        const site = world.sites[bomb.site];
+        if (site) nav.planTo(agent, nav.nearestWaypoint(site.x, site.z));
       } else if (ai.state === 'push' || ai.state === 'hold') {
         // Divert to the dropped bomb if no other attacker is closer.
         let closer = false;
@@ -434,22 +446,33 @@ export function createBots(scene, world, state) {
     }
 
     // Hearing: investigate the last heard shot (hearing.js).
-    hearing.investigate(agent, nav.planTo, nav.nearestWaypoint, ctx.radio);
+    // BUG 4: the bomb carrier never investigates — chasing a sound
+    // replaces its site route and it never walks back.
+    const isCarrier = isAttacker && bomb.carrierId === agent.id && bomb.status === 'carried';
+    if (!isCarrier) hearing.investigate(agent, nav.planTo, nav.nearestWaypoint, ctx.radio);
     // Once the bomb is planted, the planter stops channeling and holds the
     // site like any other attacker (tactics.js).
     clearPlantState(agent, bomb, nav);
 
     // --- state transitions ---
-    if (ai.hasLos && ai.target && ai.target.alive && ai.state !== 'plant' && ai.state !== 'defuse') {
+    // BUG 4: the bomb carrier does not stop to duel a distant enemy. With
+    // five defenders around, some enemy is almost always visible, so an
+    // engaging carrier sits in 'engage' for the whole round (strafing in
+    // place) while the timer expires in mid. The carrier only fights
+    // close threats (<= 12 m); anything farther, it keeps pushing the
+    // site route and lets its entry teammates clear the way.
+    const carrierFarTarget = isCarrier && ai.target &&
+      dist2d(agent.pos.x, agent.pos.z, ai.target.pos.x, ai.target.pos.z) > 12;
+    if (ai.hasLos && ai.target && ai.target.alive && ai.state !== 'plant' && ai.state !== 'defuse' && !carrierFarTarget) {
       ai.state = 'engage';
-    } else if (ai.state === 'engage' && (!ai.target || !ai.target.alive || !ai.hasLos)) {
+    } else if (ai.state === 'engage' && (!ai.target || !ai.target.alive || !ai.hasLos || carrierFarTarget)) {
       ai.target = null;
       ai.state = ai.path ? 'push' : 'hold';
     }
 
     // Carrier reaches the called site: channel (bomb.js owns progress).
     if (isAttacker && bomb.carrierId === agent.id && bomb.status === 'carried') {
-      updateCarrier(agent, bomb, world);
+      updateCarrier(agent, bomb, world, nav);
     }
 
     // After the plant, attackers hold around the site; defenders rotate in.
@@ -483,29 +506,45 @@ export function createBots(scene, world, state) {
         syncMesh(agent, dt);
         return;
       }
-      // Strafe sideways while fighting, flipping direction every so often.
-      ai.strafeTimer -= dt;
-      if (ai.strafeTimer <= 0) {
-        ai.strafeTimer = randRange(rng, 0.7, 1.6);
-        ai.strafeDir = rng() < 0.5 ? -1 : 1;
+      // BUG 4: the carrier pushes through the fight along its site route
+      // instead of strafing in place — standing still to duel is how the
+      // round timer expires at the approach (minDist stuck ~14 m). It
+      // keeps facing (and shooting) the target while its feet follow the
+      // route; updateCarrier re-plans the route if it is spent.
+      if (isCarrier && ai.path && ai.pathIdx < ai.path.length) {
+        followPath(agent, dt, BOT_SPEED);
+        agent.yaw = yawTo(agent.pos, t.pos);
+        agent.mover.yaw = agent.yaw;
+      } else {
+        // Strafe sideways while fighting, flipping direction every so often.
+        ai.strafeTimer -= dt;
+        if (ai.strafeTimer <= 0) {
+          ai.strafeTimer = randRange(rng, 0.7, 1.6);
+          ai.strafeDir = rng() < 0.5 ? -1 : 1;
+        }
+        const d = dist2d(agent.pos.x, agent.pos.z, t.pos.x, t.pos.z);
+        _fwd.set(-Math.sin(agent.yaw), 0, -Math.cos(agent.yaw));
+        _right.set(-_fwd.z, 0, _fwd.x);
+        let wx = 0;
+        let wz = 0;
+        // BUG 4: a non-carrier closes with a distant enemy and backs off
+        // a close one; the carrier never chases (stage 2) — it pushes
+        // through on its route instead (branch above).
+        if (!isCarrier) {
+          if (d > 14) {
+            wx += _fwd.x;
+            wz += _fwd.z;
+          } else if (d < 5) {
+            wx -= _fwd.x;
+            wz -= _fwd.z;
+          }
+        }
+        wx += _right.x * ai.strafeDir * 0.7;
+        wz += _right.z * ai.strafeDir * 0.7;
+        const wl = Math.hypot(wx, wz) || 1;
+        agent.mover.step(dt, wx / wl, wz / wl, BOT_CROUCH_SPEED, false, false);
+        ai.walkPhase += dt * 9;
       }
-      const d = dist2d(agent.pos.x, agent.pos.z, t.pos.x, t.pos.z);
-      _fwd.set(-Math.sin(agent.yaw), 0, -Math.cos(agent.yaw));
-      _right.set(-_fwd.z, 0, _fwd.x);
-      let wx = 0;
-      let wz = 0;
-      if (d > 14) {
-        wx += _fwd.x;
-        wz += _fwd.z;
-      } else if (d < 5) {
-        wx -= _fwd.x;
-        wz -= _fwd.z;
-      }
-      wx += _right.x * ai.strafeDir * 0.7;
-      wz += _right.z * ai.strafeDir * 0.7;
-      const wl = Math.hypot(wx, wz) || 1;
-      agent.mover.step(dt, wx / wl, wz / wl, BOT_CROUCH_SPEED, false, false);
-      ai.walkPhase += dt * 9;
 
       // Burst fire, only after the reaction delay has passed.
       const weapon = WEAPONS[agent.weaponId] || WEAPONS.pistol;

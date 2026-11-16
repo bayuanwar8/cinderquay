@@ -42,11 +42,18 @@ export function createZones(scene, world) {
     const labelSprite = new THREE.Sprite(new THREE.SpriteMaterial({
       map: makeLabelTexture('PLANT ZONE'), transparent: true, depthWrite: false,
     }));
-    // Label floats just above the device (y 1.1, not 2.4): at 2.4 it
-    // crossed the radio feed in the plant capture; down here it sits
-    // clear of the HUD and still reads above the bomb.
+    // Label sits off-centre, toward the site's north-east edge: in the
+    // plant capture the camera looks north-west from the south-east, so
+    // world (+x, -z) is screen-right. The defuser kneels on the west side
+    // of the device and the rifle muzzle sits centre-frame, so a centred
+    // label reads "LANT ZON" — P behind the defuser, E behind the muzzle.
+    // A 1.0 m screen-right shift (inside the 3.4 m ring) clears the
+    // defuser, and y 1.45 lifts the text just above the muzzle sight
+    // (its top is ~y 1.3 in frame) while staying well below the radio
+    // feed — y 2.4 used to cross it. Same offset fits site B: it is
+    // also approached from the south, so (+x, -z) is screen-right there.
     labelSprite.scale.set(4.4, 0.83, 1);
-    labelSprite.position.set(s.x, 1.1, s.z);
+    labelSprite.position.set(s.x + 0.71, 1.45, s.z - 0.71);
     labelSprite.visible = false;
     scene.add(labelSprite);
 
